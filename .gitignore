@@ -1,0 +1,11 @@
+# ビルド成果物
+target/
+
+# 環境変数
+.env
+
+# macOS
+.DS_Store
+
+# まだ作成中のアーキテクチャ
+*.drawio
