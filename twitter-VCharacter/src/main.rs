@@ -15,7 +15,7 @@ async fn main() {
     let (generator, publisher) = build_app().expect("初期化失敗");
 
     // 文章を生成
-    let content = generator.generate().expect("文章生成に失敗しました");
+    let content = generator.generate().await.expect("文章生成に失敗しました");
 
     // 文章を準備
     let post = prepare_post(content);

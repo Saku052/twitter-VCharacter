@@ -1,13 +1,17 @@
 use anyhow::{Context, Result};
 use crate::adapters::twitter::TwitterClient;
-use crate::adapters::static_content::StaticContent;
+use crate::adapters::openai::OpenAiClient;
 use crate::ports::ai_generator::AiGenerator;
 use crate::ports::text_publisher::TextPublisher;
 
 pub fn build_app() -> Result<(impl AiGenerator, impl TextPublisher)> {
-    dotenvy::dotenv().ok(); // .env ファイルを読み込む
+    dotenvy::dotenv().ok();
 
-    let generator = StaticContent::new();
+    let generator = OpenAiClient::new(
+        std::env::var("OPENAI_API_KEY").context("OPENAI_API_KEY が設定されていません")?,
+        "gpt-4o-mini".to_string(),
+        "あなたはさくというゲームクリエイターのVTuberです。140字以内でツイートを生成してください。".to_string(),
+    );
 
     let publisher = TwitterClient::new(
         std::env::var("TWITTER_API_KEY").context("TWITTER_API_KEY が設定されていません")?,

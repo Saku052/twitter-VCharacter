@@ -12,7 +12,7 @@ impl StaticContent {
 
 #[async_trait]
 impl AiGenerator for StaticContent {
-    fn generate(&self) -> Result<String> {
+    async fn generate(&self) -> Result<String> {
         Ok(CONTENTS.to_string())
     }
 }
