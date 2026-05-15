@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use crate::ports::ai_generator::AiGenerator;
 
 const OPENAI_API_URL: &str = "https://api.openai.com/v1/chat/completions";
-const USER_PROMPT: &str = "今日のツイートを生成してください。";
+const USER_PROMPT: &str = "メモ: 大学生の時ココナラで初めてお金もらった瞬間を今でも忘れない";
 
 pub struct OpenAiClient {
     api_key: String,

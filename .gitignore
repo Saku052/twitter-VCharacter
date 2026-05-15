@@ -9,3 +9,4 @@ target/
 
 # まだ作成中のアーキテクチャ
 *.drawio
+*.jsonl
