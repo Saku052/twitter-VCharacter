@@ -26,5 +26,3 @@ async fn main() {
         Err(e) => eprintln!("エラー: {}", e),
     }
 }
-
- 
