@@ -3,38 +3,35 @@ use async_trait::async_trait;
 use crate::ports::ai_generator::AiGenerator;
 
 const OPENAI_API_URL: &str = "https://api.openai.com/v1/chat/completions";
-const USER_PROMPT: &str = "メモ: 大学生の時ココナラで初めてお金もらった瞬間を今でも忘れない";
 
 pub struct OpenAiClient {
     api_key: String,
-    model: String,
-    system_prompt: String,
 }
 
 impl OpenAiClient {
-    pub fn new(api_key: String, model: String, system_prompt: String) -> Self {
-        Self { api_key, model, system_prompt }
+    pub fn new(api_key: String) -> Self {
+        Self { api_key }
     }
 }
 
 #[async_trait]
 impl AiGenerator for OpenAiClient {
-    async fn generate(&self) -> Result<String> {
+    async fn generate(&self, memo: &str, model: &str, system: &str) -> Result<String> {
         let client = reqwest::Client::new();
 
         let response = client
             .post(OPENAI_API_URL)
             .bearer_auth(&self.api_key)
             .json(&serde_json::json!({
-                "model": self.model,
+                "model": model.to_string(),
                 "messages": [
                     {
                         "role": "system",
-                        "content": self.system_prompt
+                        "content": system.to_string()
                     },
                     {
                         "role": "user",
-                        "content": USER_PROMPT
+                        "content": memo.to_string()
                     }
                 ]
             }))

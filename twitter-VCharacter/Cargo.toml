@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.102"
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"] }
 async-trait = "0.1.89"
 base64 = "0.22.1"
 dotenvy = "0.15.7"
