@@ -5,6 +5,7 @@ use crate::ports::memo_queue::MemoQueue;
 
 pub struct PostgresClient {
     pool: PgPool,
+    // ここに momo {String, id}入れたとして、一つのインスタンスとして残るのか検証してみる
 }
 
 impl PostgresClient {
@@ -17,7 +18,7 @@ impl PostgresClient {
 #[async_trait]
 impl MemoQueue for PostgresClient {
     async fn fetch_latest_memo(&self) -> Result<String> {
-        let memo = sqlx::query_scalar::<_, String>(
+        let memo = sqlx::query_scalar::<_, String>( // TODO: スカラーではなくす
             "SELECT
                 memo
             FROM
@@ -30,8 +31,7 @@ impl MemoQueue for PostgresClient {
         )
         .fetch_one(&self.pool)
         .await?;
-        //　この後テーブルをアップデートしないといけないよね
 
-        Ok(memo)
+        Ok(memo) // TODO: Resultのベクトル化
     }
 }
