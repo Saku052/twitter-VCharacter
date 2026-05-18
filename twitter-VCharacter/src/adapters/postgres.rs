@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use sqlx::PgPool;
-use crate::ports::memo_repository::MemoRepository;
+use crate::ports::memo_queue::MemoQueue;
 
 pub struct PostgresClient {
     pool: PgPool,
@@ -15,7 +15,7 @@ impl PostgresClient {
 }
 
 #[async_trait]
-impl MemoRepository for PostgresClient {
+impl MemoQueue for PostgresClient {
     async fn fetch_latest_memo(&self) -> Result<String> {
         let memo = sqlx::query_scalar::<_, String>(
             "SELECT
@@ -24,7 +24,7 @@ impl MemoRepository for PostgresClient {
                 memo_mq
             WHERE
                 used_at IS NULL
-            ORDERBY
+            ORDER BY
                 created_at
             LIMIT 1"
         )

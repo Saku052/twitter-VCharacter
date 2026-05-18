@@ -6,7 +6,7 @@ mod config;
 use config::build_app;
 use domain::post::prepare_post;
 use ports::ai_generator::AiGenerator;
-use ports::memo_repository::MemoRepository;
+use ports::memo_queue::MemoQueue;
 use ports::text_publisher::TextPublisher;
 
 const GPT_MODEL: &str = "ft:gpt-4.1-2025-04-14:personal:tweetsource1:DfS5fKl8";

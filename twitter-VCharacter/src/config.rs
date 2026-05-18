@@ -3,10 +3,10 @@ use crate::adapters::twitter::TwitterClient;
 use crate::adapters::openai::OpenAiClient;
 use crate::adapters::postgres::PostgresClient;
 use crate::ports::ai_generator::AiGenerator;
-use crate::ports::memo_repository::MemoRepository;
+use crate::ports::memo_queue::MemoQueue;
 use crate::ports::text_publisher::TextPublisher;
 
-pub async fn build_app() -> Result<(impl AiGenerator, impl TextPublisher, impl MemoRepository)> {
+pub async fn build_app() -> Result<(impl AiGenerator, impl TextPublisher, impl MemoQueue)> {
     dotenvy::dotenv().ok();
 
     let generator = OpenAiClient::new(
