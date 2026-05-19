@@ -25,7 +25,8 @@ async fn main() {
     let memo = memo_repo.fetch_latest_memo().await.expect("メモの取得に失敗しました");
 
     // 文章を生成
-    let content = generator.generate(&memo, GPT_MODEL, SYS_PRPT).await.expect("文章生成に失敗しました");
+    // TODO: 本当はmemoの部分はDBに制約をつけておいた方が良い
+    let content = generator.generate(&memo.memo.unwrap_or_default(), GPT_MODEL, SYS_PRPT).await.expect("文章生成に失敗しました");
 
     // 文章を準備
     let post = prepare_post(content);

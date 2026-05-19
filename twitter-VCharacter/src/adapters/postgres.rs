@@ -5,7 +5,7 @@ use crate::ports::memo_queue::MemoQueue;
 
 pub struct PostgresClient {
     pool: PgPool,
-    // ここに momo {String, id}入れたとして、一つのインスタンスとして残るのか検証してみる
+    // TODO: ここに momo {String, id}入れたとして、一つのインスタンスとして残るのか検証してみる
 }
 
 impl PostgresClient {
@@ -15,12 +15,21 @@ impl PostgresClient {
     }
 }
 
+#[derive(sqlx::FromRow)]
+pub struct MemoRow {
+    pub id: i32,
+    pub memo: Option<String>,
+}
+
+// TODO: FronRowトレイト for {variable}ってことだよねderiveって。
+// それがしたいのはMemoRowの変数にマッピングするfunctionがFromRowに備わっているから
+// じゃあMemoQueueトレイトをPostgresClientにした理由ってなに？これを調査してまとめる
 #[async_trait]
 impl MemoQueue for PostgresClient {
-    async fn fetch_latest_memo(&self) -> Result<String> {
-        let memo = sqlx::query_scalar::<_, String>( // TODO: スカラーではなくす
+    async fn fetch_latest_memo(&self) -> Result<MemoRow> {
+        let row = sqlx::query_as!(MemoRow,
             "SELECT
-                memo
+                id, memo
             FROM
                 memo_mq
             WHERE
@@ -32,6 +41,6 @@ impl MemoQueue for PostgresClient {
         .fetch_one(&self.pool)
         .await?;
 
-        Ok(memo) // TODO: Resultのベクトル化
+        Ok(row) // TODO: Resultのベクトル化
     }
 }
