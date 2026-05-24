@@ -26,6 +26,8 @@ async fn main() {
 
     // 文章を生成
     // TODO: 本当はmemoの部分はDBに制約をつけておいた方が良い
+    // TODO: これ普通にmemoも方も直接とる（unwrap_or_defaultじゃない方法）とか何のか？
+    let memoid: i32 = memo.id;
     let content = generator.generate(&memo.memo.unwrap_or_default(), GPT_MODEL, SYS_PRPT).await.expect("文章生成に失敗しました");
 
     // 文章を準備
@@ -33,7 +35,10 @@ async fn main() {
 
     // 投稿
     match publisher.post_text(&post).await {
-        Ok(_) => println!("完了！"),
+        Ok(_) => {
+            memo_repo.mark_used_memo(memoid).await.expect("メモの更新に失敗");
+            println!("完了！")
+        },
         Err(e) => eprintln!("エラー: {}", e),
     }
 }

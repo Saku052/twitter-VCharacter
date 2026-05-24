@@ -39,8 +39,20 @@ impl MemoQueue for PostgresClient {
             LIMIT 1"
         )
         .fetch_one(&self.pool)
-        .await?;
+        .await?; 
 
         Ok(row) // TODO: Resultのベクトル化
+    }
+
+    async fn mark_used_memo(&self, id: i32) -> Result<()> {
+        sqlx::query!(
+            "UPDATE memo_mq
+            SET used_at = NOW()
+            WHERE id = $1",
+            id
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 }
