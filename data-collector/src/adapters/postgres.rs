@@ -26,33 +26,10 @@ pub struct MemoRow {
 // じゃあMemoQueueトレイトをPostgresClientにした理由ってなに？これを調査してまとめる
 #[async_trait]
 impl MemoQueue for PostgresClient {
-    async fn fetch_latest_memo(&self) -> Result<MemoRow> {
-        let row = sqlx::query_as!(MemoRow,
-            "SELECT
-                id, memo
-            FROM
-                memo_mq
-            WHERE
-                used_at IS NULL
-            ORDER BY
-                created_at
-            LIMIT 1"
-        )
-        .fetch_one(&self.pool)
-        .await?; 
-
-        Ok(row) // TODO: Resultのベクトル化
-    }
-
-    async fn mark_used_memo(&self, id: i32) -> Result<()> {
-        sqlx::query!(
-            "UPDATE memo_mq
-            SET used_at = NOW()
-            WHERE id = $1",
-            id
-        )
-        .execute(&self.pool)
-        .await?;
+    async fn insert_memo(&self, memo: &str) -> Result<()> {
+        sqlx::query!("INSERT INTO memo_mq (memo) VALUES ($1)", memo)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 }

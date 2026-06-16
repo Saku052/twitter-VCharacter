@@ -1,20 +1,20 @@
 use async_trait::async_trait;
 use serde::Deserialize;
-use crate::ports::youtube_port::youtube_port;
+use crate::ports::youtube_port::YoutubePort;
 use anyhow::Result;
 
-pub struct youtube_client {
+pub struct YoutubeClient {
     api_key: String
 }
 
-impl youtube_client {
+impl YoutubeClient {
     pub fn new(api_key: String) -> Self {
         Self {api_key}
     }
 }
 
 #[async_trait]
-impl youtube_port for youtube_client {
+impl YoutubePort for YoutubeClient {
     
     async fn get_youtube_video(&self) -> Result<(String, String)>{
         let client = reqwest::Client::new();
@@ -31,7 +31,7 @@ impl youtube_port for youtube_client {
     .await?;
         
         // TODO: responseを噛み砕いたものをかく
-        let body: youtubeResponse = response.json().await?;
+        let body: YoutubeResponse = response.json().await?;
         let title = body.items[0].snippet.title.clone();
         let description = body.items[0].snippet.description.clone();
 
@@ -46,12 +46,12 @@ impl youtube_port for youtube_client {
 //----------------------------------------------------------------------------------------------------------------------------
 
 #[derive(Deserialize)]
-struct youtubeResponse {
-    items: Vec<youtubeItem>
+struct YoutubeResponse {
+    items: Vec<YoutubeItem>
 }
 
 #[derive(Deserialize)]
-struct youtubeItem {
+struct YoutubeItem {
     snippet: Snippet
 }
 
