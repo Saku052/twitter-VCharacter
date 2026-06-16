@@ -15,12 +15,6 @@ impl PostgresClient {
     }
 }
 
-#[derive(sqlx::FromRow)]
-pub struct MemoRow {
-    pub id: i32,
-    pub memo: Option<String>,
-}
-
 // TODO: FronRowトレイト for {variable}ってことだよねderiveって。
 // それがしたいのはMemoRowの変数にマッピングするfunctionがFromRowに備わっているから
 // じゃあMemoQueueトレイトをPostgresClientにした理由ってなに？これを調査してまとめる
