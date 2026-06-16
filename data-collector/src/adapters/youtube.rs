@@ -20,23 +20,27 @@ impl YoutubePort for YoutubeClient {
         let client = reqwest::Client::new();
 
         let response = client
-    .get("https://www.googleapis.com/youtube/v3/playlistItems")
-    .query(&[
-        ("part", "snippet"),
-        ("playlistId", "PLmnlM73lBYpMeZRdjxpTRvoTDKfJG-pIA"),
-        ("maxResults", "10"),
-        ("key", &self.api_key.as_str()),
-    ])
-    .send()
-    .await?;
-        
+            .get("https://www.googleapis.com/youtube/v3/playlistItems")
+            .query(&[
+                ("part", "snippet"),
+                ("playlistId", "PLmnlM73lBYpMeZRdjxpTRvoTDKfJG-pIA"),
+                ("maxResults", "30"),
+                ("key", self.api_key.as_str()),
+            ])
+            .send()
+            .await?
+            .error_for_status()?;
+
         // TODO: responseを噛み砕いたものをかく
         let body: YoutubeResponse = response.json().await?;
-        let title = body.items[0].snippet.title.clone();
-        let description = body.items[0].snippet.description.clone();
+        let latest = body
+            .items
+            .into_iter()
+            .last()
+            .ok_or_else(|| anyhow::anyhow!("playlist is empty"))?;
 
         // TODO: return　としてsnippetを返すの一番理想的
-        Ok((title, description))
+        Ok((latest.snippet.title, latest.snippet.description))
     }
     
 }
