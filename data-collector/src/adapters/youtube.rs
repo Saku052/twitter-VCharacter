@@ -59,6 +59,7 @@ struct YoutubeItem {
     snippet: Snippet
 }
 
+// get Video id from here to resolve duplicate tweet topic
 #[derive(Deserialize)]
 struct Snippet {
     title: String,
