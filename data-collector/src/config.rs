@@ -2,13 +2,13 @@ use crate::ports::youtube_port::YoutubePort;
 use crate::adapters::youtube::YoutubeClient;
 use crate::ports::ai_generator::AiGenerator;
 use crate::adapters::openai::OpenAiClient;
-use crate::ports::memo_queue::MemoQueue;
+use crate::ports::memo_writer::MemoWriter;
 use crate::adapters::postgres::PostgresClient;
 use anyhow::Result;
 use std::env;
 
 
-pub async fn build_app() -> Result<(impl YoutubePort, impl AiGenerator, impl MemoQueue)> {
+pub async fn build_app() -> Result<(impl YoutubePort, impl AiGenerator, impl MemoWriter)> {
     //一旦envファイルを読み込む
     dotenvy::dotenv().ok();
     let youtube_client = YoutubeClient::new(

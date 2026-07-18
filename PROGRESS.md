@@ -13,50 +13,31 @@
 
 ## data-collector
 
-YouTubeプレイリストからタイトル・説明文を取得するアダプターを実装中。
-現状コンパイルは通っている（warning 8件のみ、エラーなし）。
+**現フェーズ: 開発速度優先。方針が明確な変更はClaudeが直接実装する。**
+
+YouTubeプレイリストから直近10件の動画を取得し、未処理分だけAIでメモ化してmemo_mqに書き込むproducer。デイリーバッチ方式の実装が完了。設計の背景・理由は[ARCHITECTURE.md](ARCHITECTURE.md)を参照。
 
 ### 完了
-- `ports::youtube_port::YoutubePort`（`get_youtube_video`）と `adapters::youtube::YoutubeClient`（YouTube Data API v3 `playlistItems` 呼び出し）
-- `ports::ai_generator::AiGenerator` と `adapters::openai::OpenAiClient`（骨組み、未配線）
-- `ports::memo_queue::MemoQueue` と `adapters::postgres::PostgresClient`（twitter-VCharacterからコピー、現状は読み取り系のみ）
-- `Cargo.toml` に必要な依存追加（anyhow, async-trait, dotenvy, reqwest[json,query], serde, serde_json, sqlx, tokio）
-- `config::build_app()` で `YoutubeClient` と `OpenAiClient` をDI
-- `main.rs` で YouTube から title / description を取得して println するところまで動く
+- `ports::youtube_port::YoutubePort::fetch_recent_videos()` と `adapters::youtube::YoutubeClient`（`maxResults=10`、`Vec<VideoInfo>`を返す、空リスト対応済み）
+- `domain::VideoInfo { video_id, title, description }` 新設
+- `ports::memo_writer::MemoWriter`（`insert_memo(memo, video_id)`, `is_processed(video_id)`）と `adapters::postgres::PostgresClient`（`processed_videos`+`memo_mq`への同一トランザクション書き込み実装済み）
+- `main.rs`: 10件ループ処理（`is_processed`判定→AI生成→`insert_memo`）、1件失敗時はログ出力してcontinue、バッチ終了時に成功件数をログ出力
+- `config::build_app()` で `YoutubeClient` / `OpenAiClient` / `PostgresClient` をDI
 
-### 残課題（コード品質）
-- `ports::ai_generator::AiGenerator::generate` と `adapters::openai::OpenAiClient::generate` で引数順が食い違っている
-  - port: `(memo, system, model)` / adapter: `(memo, model, system)`
-  - 今は呼ばれていないが、繋いだ瞬間にバグる
-- `adapters/youtube.rs` の `body.items[0]` が空ベクタでパニックする（`.first().ok_or_else(...)` に直す）
-- `adapters/youtube.rs` の query 引数 `&self.api_key.as_str()` が `&&str` になっている（`self.api_key.as_str()` で十分）
-- `YoutubePort` の戻り値が `(String, String)` タプルで title/description の区別が呼び出し側で読めない → domain 型 `YoutubeVideo { title, description }` に昇格する案
-- `postgres.rs` は読み取り系のみ。data-collector は書き込みが本業なので INSERT 用のメソッド／ポートが必要
-- `main.rs:14` の「主力」は「出力」のtypo
+### 次にやること（優先順）
 
-### 設計方針（決定済み）
+1. `processed_videos` テーブルをRailway DBに作成（未実行）
+   ```sql
+   CREATE TABLE processed_videos (
+       video_id TEXT PRIMARY KEY,
+       processed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+   );
+   ```
+2. `cargo sqlx prepare` を実行し `.sqlx/` キャッシュを更新・コミット（Railwayビルドは`SQLX_OFFLINE=true`前提のため必須）
+3. ローカルで `cargo run` を実行し、DB上で `memo_mq` / `processed_videos` に増分があることを確認 → 2回目実行で全件スキップされることを確認
+4. Railway側にcronスケジュールを登録（1日1回）
+5. `data-collector/HANDOFF.md` は実装完了に伴い削除済み
 
-memo_mq テーブルの読み書きはコンポーネントごとに非対称:
-
-- twitter-VCharacter は読み取り専用（consumer） → `MemoQueue`（既存）
-- data-collector は書き込み専用（producer） → `MemoWriter`（新規）
-
-Hexagonal の流儀に従い、「アプリ側が必要としているもの」でポートを分割する（ISP）。`PostgresClient` は各プロジェクトに置き、必要な trait だけを impl する。
-
-### 次にやること
-
-1. `data-collector/src/ports/memo_writer.rs` を新規作成
-   - `trait MemoWriter { async fn insert_memo(&self, memo: &str) -> Result<()> }`
-2. `data-collector/src/ports/mod.rs` に `pub mod memo_writer;` を追加
-3. `data-collector/src/adapters/postgres.rs` を書き換え
-   - `impl MemoQueue for PostgresClient` を削除
-   - `impl MemoWriter for PostgresClient` を追加（`INSERT INTO memo_mq (memo) VALUES ($1)`）
-   - 不要になった `MemoRow` と `ports/memo_queue.rs` も削除
-4. `config::build_app()` の戻り値を `(impl YoutubePort, impl AiGenerator, impl MemoWriter)` に拡張、`PostgresClient::new(&env::var("DATABASE_URL")?)` を呼ぶ
-5. `main.rs` で 3つのポートを使って `YouTube取得 → OpenAI生成 → Postgres保存` のフローを実装
-
-### その他の残課題（コード品質、優先度低）
-- `adapters/youtube.rs` の `body.items[0]` が空ベクタでパニックする（`.first().ok_or_else(...)` に直す）
-- `adapters/youtube.rs` の query 引数 `&self.api_key.as_str()` が `&&str` になっている（`self.api_key.as_str()` で十分）
-- `YoutubePort` の戻り値が `(String, String)` タプルで title/description の区別が読めない → domain 型 `YoutubeVideo { title, description }` に昇格する案
-- `main.rs:14` の「主力」は「出力」のtypo
+### 残課題（コード品質、優先度低）
+- `main.rs:25` の「主力」は「出力」のtypo（コメント）
+- 障害通知・アラートは未整備（ログ出力のみ。[ARCHITECTURE.md §7](ARCHITECTURE.md#7-未決事項レビューで特に見てほしい点)参照）

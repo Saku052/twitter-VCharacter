@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## プロジェクト概要
 
-Twitter VTuberキャラクター「さく」（ゲーム制作が好きな社会人1年目エンジニア）のツイートを自動生成・投稿するRustボット。Hexagonal Architecture（Ports & Adapters）を学習しながら実践するためのプロジェクトでもある。
+Twitter VTuberキャラクター「さく」（ゲーム制作が好きな社会人1年目エンジニア）のツイートを自動生成・投稿するRustボット。Hexagonal Architecture（Ports & Adapters）を採用している（採用理由は[ARCHITECTURE.md](ARCHITECTURE.md)参照）。
 
 Cargoワークスペースではなく、独立した2つのRustプロジェクトで構成されている:
 
@@ -49,9 +49,18 @@ src/
 - `ports::text_publisher::TextPublisher` ← `adapters::twitter::TwitterClient`（OAuth 1.0a署名付きでX API v2に投稿）
 - `ports::memo_queue::MemoQueue` ← `adapters::postgres::PostgresClient`（`memo_mq`テーブルをキューとして使用）
 
-### MemoQueueパターン（memo_mqテーブル）
+### MemoQueueパターン（memo_mqテーブル、twitter-VCharacter側）
 
 `memo_mq` テーブルは「未使用のメモ」を保持するキュー。`used_at IS NULL` の最も古い行を1件取得し（`fetch_latest_memo`）、ツイート投稿に成功したら `mark_used_memo(id)` で `used_at = NOW()` を設定して使用済みにする。`sqlx::query_as!` でSELECT、`sqlx::query!` でUPDATEを行う（戻り値をstructにマッピングしない場合は `query_as!` ではなく `query!` を使う）。
+
+### data-collector側の書き込みポート
+
+memo_mq の読み書きはコンポーネントごとに非対称:
+
+- twitter-VCharacter は読み取り専用（consumer） → `MemoQueue`
+- data-collector は書き込み専用（producer） → `MemoWriter`（`insert_memo`, `is_processed`）
+
+重複排除は `processed_videos(video_id TEXT PRIMARY KEY, processed_at TIMESTAMPTZ)` テーブルで行う。設計理由（なぜ`memo_mq`に列を足さず別テーブルにしたか等）は[ARCHITECTURE.md §3.3](ARCHITECTURE.md#33-共有dbテーブル)参照。
 
 ## 環境変数（.env）
 
@@ -72,25 +81,22 @@ sqlxのマクロはビルド時にDB接続を要求するため、ビルドコ�
 
 ## 私（ユーザー）について
 
-- Rustは学習中。async/await、トレイト、所有権・借用などの概念を一つずつ確認しながら進めたい
-- Hexagonal Architectureの理解を深めることが目的の一つ。ports/adaptersの役割分担に疑問を持ったらまず説明する
+- 開発速度を優先するフェーズ。要件定義・実装ともにAI（Claude Code）が主導する
 - 日本語でやりとりする
 
-## Claude Code としての振る舞い方
+## Claude Code としての振る舞い方（現フェーズ: 開発優先）
 
-1. **コードを勝手に修正しない**
-   - 「直していい？」と確認してから変更する
-   - ユーザーが「は？勝手に直さないで」と言ったことがある — 提案 → 承諾 → 実行の順を守る
+data-collectorコンポーネントの開発をなるはやで進めるのが現在の優先事項。twitter-VCharacter, data-collector 双方について、方針が明確な変更は確認を挟まず直接実装してよい。
 
-2. **コードは基本ユーザーが書く、Claudeはレビューと解説が中心**
-   - 「レビューして」と言われたら、ファイルを読んで問題点を指摘する（致命的なエラー→改善点→良い点の順）
-   - 明示的に「実装して」「修正して」と頼まれたときだけ書く
+1. **直接実装してよい**
+   - 提案→承諾→実行の逐一確認は不要。設計方針に迷いがある場合や、影響範囲が大きい変更（DBスキーマ変更、破壊的変更など）のときだけ確認する
+   - 実装後にどう変更したか・なぜそうしたかを簡潔に報告する
 
-3. **概念の説明は丁寧に、かつ具体的に**
-   - Rustの文法・概念（所有権、トレイト、deriveなど）で詰まったら、コードの該当箇所に即して説明する
-   - 「なぜそうなるのか」を、抽象論ではなくこのプロジェクトのコードを例に説明する
+2. **説明は簡潔に**
+   - Rustの文法・概念の丁寧な解説（所有権、トレイト、deriveなどの背景説明）は省略してよい
+   - コードレビュー時は「致命的なエラー→改善点→良い点」の順で指摘する
 
-4. **タイポ・命名規則の指摘は都度行う**
+3. **タイポ・命名規則の指摘は都度行う**
    - PascalCase/snake_caseの規約違反、typo（`aync`, `Deserilize`など）は早めに指摘する
 
 ## PROGRESS.md の運用

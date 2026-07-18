@@ -1,11 +1,10 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use sqlx::PgPool;
-use crate::ports::memo_queue::MemoQueue;
+use crate::ports::memo_writer::MemoWriter;
 
 pub struct PostgresClient {
     pool: PgPool,
-    // TODO: ここに momo {String, id}入れたとして、一つのインスタンスとして残るのか検証してみる
 }
 
 impl PostgresClient {
@@ -15,15 +14,30 @@ impl PostgresClient {
     }
 }
 
-// TODO: FronRowトレイト for {variable}ってことだよねderiveって。
-// それがしたいのはMemoRowの変数にマッピングするfunctionがFromRowに備わっているから
-// じゃあMemoQueueトレイトをPostgresClientにした理由ってなに？これを調査してまとめる
 #[async_trait]
-impl MemoQueue for PostgresClient {
-    async fn insert_memo(&self, memo: &str) -> Result<()> {
+impl MemoWriter for PostgresClient {
+    async fn insert_memo(&self, memo: &str, video_id: &str) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query!(
+            "INSERT INTO processed_videos (video_id) VALUES ($1) ON CONFLICT DO NOTHING",
+            video_id
+        )
+        .execute(&mut *tx)
+        .await?;
         sqlx::query!("INSERT INTO memo_mq (memo) VALUES ($1)", memo)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
         Ok(())
+    }
+
+    async fn is_processed(&self, video_id: &str) -> Result<bool> {
+        let row = sqlx::query!(
+            "SELECT EXISTS(SELECT 1 FROM processed_videos WHERE video_id = $1) AS \"exists!\"",
+            video_id
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.exists)
     }
 }
