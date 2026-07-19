@@ -1,6 +1,11 @@
 # ビルド成果物
 target/
 
+# Python
+.venv/
+__pycache__/
+*.pyc
+
 # 環境変数
 .env
 

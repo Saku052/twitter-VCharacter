@@ -187,9 +187,178 @@ data-collector (Rust)
 - **通信方式**: シンプルなHTTP(REST)。Python側はFastAPI等で`POST /investigate`のような1エンドポイントを公開し、Rust側は既存のreqwestでそのまま叩く（新規依存クレート不要）
 - Rust側のコードにAgent SDK/Pythonの実装詳細は一切漏れない。`AgentPort` traitがHTTP呼び出しをラップする
 
+### プロンプト設計（確定）
+
+調査の結果、Claude Agent SDK公式ドキュメントが「CLAUDE.md（baseline/恒常ルール）+ systemPrompt append（task-specific/タスク単位の指示）をSDKがlayerとして重ねる」という構成を公式に推奨していることが判明。この2層構成を採用する。
+
+**重要な実装上の注意点**: CLAUDE.mdはSDKが自動では読み込まない。Python側で`ClaudeAgentOptions(setting_sources=["project"])`を明示的に指定しないと、CLAUDE.mdファイルをどれだけ書いても無視される（本番デプロイでの最頻出の設定ミスとして公式ドキュメントに明記あり）。Python wrapper実装時に必ず反映すること。
+
+**モデル**: Sonnet 5、reasoning effort high
+
+**CLAUDE.md（恒常ルール、Web検索wrapperのプロジェクトルートに配置）**:
+```markdown
+# CLAUDE.md
+
+## あなたの役割
+さく（技術が好きな社会人1年目のエンジニア、VTuberキャラクター）担当の編集者です。
+Web検索で見つけたネタ元を読み、さくが話したくなりそうなポイントだけを抜き出してメモにします。
+
+## 出力ルール
+- 出力は日本語の短いメモ1個のみ（50文字以内）
+- ハッシュタグや絵文字は付けない
+- 事実をそのまま要約するのではなく「これ面白いな」「これ自分でも試したい」のような感想・気づきの形に変換する
+- 専門用語は無理に避けず、ただし社会人1年目が背伸びしすぎない温度感で
+- コードや型名など込み入った専門用語は、メモの時点で噛み砕く
+
+## 配慮事項
+- 個人の具体的な実績・成果物（自作サービスの収益、バズった投稿の裏側など）を、さく自身の体験のように語らない
+- 一次情報の断定ではなく、あくまで「見つけたネタを編集した」という前提を保つ
+```
+
+**タスクプロンプト（systemPrompt append、毎回の調査指示）**:
+```markdown
+今日の技術トレンドを1つ調べて、メモを1個作成してください。
+
+## 手順
+
+### Step 1: 広く探る（検索2〜3回）
+まず短く広いクエリで、今どんな技術トピックが話題になっているか全体像をつかんでください。
+例: 「プログラミング トレンド 2026」「AI開発 話題」など。
+特定の技術・製品名を最初から狙い撃ちしないこと。
+
+### Step 2: 絞り込む（検索最大3回）
+Step 1で見つけた候補の中から、気になったものを1つ選び、内容を深掘りしてください。
+複数の候補を並行して深掘りしない。1つに決めてから掘る。
+
+### Step 3: メモを確定する
+選んだトピックについて、CLAUDE.mdのルールに従ってメモを1個作成し、それを最終出力としてください。
+メモが完成したら、それ以上の検索は行わないこと。
+
+## 終了条件
+- メモ1個を出力したら終了
+- 合計10ターンを超えたら、その時点までの情報で必ずメモを1個確定させて終了する（探索を続けない）
+- 「これ以上良いネタが見つかるかもしれない」という理由だけで探索を継続しないこと
+```
+
+設計のポイント: 各ステップに検索回数の目安を明記（Anthropic公式記事の「タスク規模に応じた予算を先に決める」原則）、「1つに決めてから掘る」を明示（並行調査による予算浪費を防ぐ）、終了条件を「メモ完成」と「10ターン超えたら強制確定」の2通りで重ねて書き、Agentが際限なく探索を続けるのを防ぐ。
+
+### 失敗時・出力フォーマットの方針（確定）
+
+- **出力フォーマット**: メモ文字列のみ（参照元URL等の構造化データは持たない）
+- **失敗時**: Agentが終了条件までに良いメモを確定できなかった場合、Python wrapper側は**HTTPエラーを返す**（空文字列を正常応答としてRust側に渡さない。`memo_mq`に空メモが入るリスクを防ぐため）
+- **Rust側の扱い**: `AgentPort`からHTTPエラーが返ってきた場合、その回の処理をスキップするだけで他のロジック（YouTube/Qiita等）は継続する。Phase1/2で確立した「1ソースの失敗が全体を止めない」パターンをそのまま踏襲する
+
+### Python wrapper / Rustインターフェース設計（確定）
+
+**Webフレームワーク**: FastAPI。1エンドポイントだけの小さなアプリなので最も一般的な選択。Claude Agent SDK Python版もasync前提で相性が良い。
+
+**`AgentPort`（Rust側）**:
+```rust
+// ports/agent_port.rs
+use async_trait::async_trait;
+use anyhow::Result;
+
+#[async_trait]
+pub trait AgentPort {
+    async fn investigate(&self) -> Result<String>;
+}
+```
+YouTube/Qiitaの`Vec<T>`を返す設計とは異なり、単一の`String`（メモ文字列）を1件返す。Phase3で決めた「1バッチ=1件のメモ」を反映。Web調査は既にAgent内部でメモを作り切っているため、`main.rs`側では`is_processed`のような重複判定は挟まず、`insert_agent_memo`にそのまま渡す。
+
+**`MemoWriter`への追加メソッド**:
+```rust
+async fn insert_agent_memo(&self, memo: &str) -> Result<()>;
+```
+YouTube用`insert_memo(memo, video_id)`・Qiita用`insert_qiita_memo(memo, article_id)`と異なり、重複排除をスコープアウトしているためID引数を取らない。`memo_mq`に`source='agent'`としてINSERTするだけのシンプルな実装になる見込み。
+
+**認証**: 簡易認証（共有トークンを`X-API-Key`ヘッダ等に固定値で付与）。Railway内部のプライベート通信想定だが、環境変数の設定ミスで外部から叩かれる事故を防ぐため導入する。
+
+**タイムアウト**: Rust側のHTTPクライアントは**1200秒（20分）**でタイムアウト設定する。10ターン分の検索・AI推論を含む前提で、余裕を持たせつつ異常な強直りも検知できる長さ。
+
+**`main.rs`での呼び出しイメージ**:
+```rust
+match app.3.investigate().await {
+    Ok(memo) => {
+        match app.2.insert_agent_memo(&memo).await {
+            Ok(()) => { /* success */ }
+            Err(e) => { /* ログ出力、他ソースの処理は継続 */ }
+        }
+    }
+    Err(e) => {
+        eprintln!("Agent調査に失敗: {:?}", e);
+        // このスキップだけで、YouTube/Qiitaの処理には影響しない
+    }
+}
+```
+
+### Web検索・認証まわりの調査結果（確定＋一部未決）
+
+**Web検索ツール**: Claude Agent SDKには`WebSearch`が標準の組み込みツールとして提供されている（server tool、Anthropicのインフラ上で実行される）。`allowed_tools`に追加するだけで使え、別途Google/Bing等の検索APIキーを用意する必要はない。
+
+**認証方式（確定）**: Claude Pro/Maxサブスクのクレジットをそのまま使う。`claude setup-token`コマンドで発行したOAuthトークン（`sk-ant-oat01-`で始まる）を`CLAUDE_CODE_OAUTH_TOKEN`環境変数にセットする方式が公式にサポートされている。Claude Proは月$20分のAgent SDKクレジットを含む。ユーザーが既に他プロジェクトで発行済みのトークンをそのまま流用する。
+
+**実装上の重大な注意点（確定）**: Python wrapperのデプロイ環境（Railway）に`ANTHROPIC_API_KEY`環境変数を**絶対に設定しないこと**。この変数が存在すると、Claude Agent SDKはサブスクのOAuthトークンより優先してAPIキー側の従量課金ルートを使ってしまい、意図せず別課金が発生する。`CLAUDE_CODE_OAUTH_TOKEN`のみを設定する。
+
+**未決事項として保留**: Web検索ツール（`$10/1,000検索`という従量課金情報が見つかっている）が、サブスクのAgent SDKクレジット枠に含まれるのか、それともサブスク経由でも別途課金が発生するのかは今回の調査で確認しきれなかった。結論を出さず保留し、実装後に少額のテスト実行を行って請求実績で確認する方針とする。
+
+### `build_app()`統合・環境変数（確定）
+
+`config::build_app()`の戻り値タプル末尾に`AgentPort`を追加する（既存の`(YoutubePort, AiGenerator, MemoWriter, QiitaPort)`を`(..., AgentPort)`に拡張、`app.0`〜`app.3`の参照は不変）。
+
+```rust
+pub async fn build_app() -> Result<(impl YoutubePort, impl AiGenerator, impl MemoWriter, impl QiitaPort, impl AgentPort)> {
+    // 既存の組み立てに加えて
+    let agent_client = AgentClient::new(
+        env::var("AGENT_SDK_URL").expect("AGENT_SDK_URL が設定されていません"),
+        env::var("AGENT_SDK_API_KEY").expect("AGENT_SDK_API_KEY が設定されていません"),
+    );
+
+    Ok((youtube_client, openai_client, memo_repo, qiita_client, agent_client))
+}
+```
+
+Rust側（data-collector）に新規追加する環境変数:
+- `AGENT_SDK_URL`: Python wrapperのRailway上のURL（サービス間の内部通信用）
+- `AGENT_SDK_API_KEY`: 簡易認証用の共有トークン（`X-API-Key`ヘッダに付与）
+
 ### 未決事項（次回詰める）
 
-- Agentへの指示プロンプトの具体的な内容（「トレンドを調べて」だけでは曖昧すぎるため、対象範囲・除外基準等の具体化が必要。ユーザーと後日一緒に詰める）
-- Python wrapperアプリの技術選定（FastAPI等のフレームワーク、Claude Agent SDKの具体的な組み込み方）
-- `AgentPort`のRust側インターフェース設計（`investigate() -> Result<String>`のようなシンプルな形になる見込み）
-- Python wrapperアプリ↔Rust間の認証・エラーハンドリング（HTTPタイムアウト、Agent側の例外の伝搬方法等）
+- Web検索ツールの課金がサブスク枠内かどうか（上記、実装・テスト実行で確認）
+- Railway側のデプロイ設定（Python wrapperサービスの環境変数。`CLAUDE_CODE_OAUTH_TOKEN`を設定し`ANTHROPIC_API_KEY`は設定しないことを徹底する）
+
+## Phase3（実装完了）
+
+`HANDOFF_PHASE3.md`の指令書通りに実装。設計の詳細は上記の各セクションを参照。
+
+### 実装内容
+
+- **agent-wrapper/**（新規プロジェクト、リポジトリルート直下）
+  - `main.py`: FastAPI、`POST /investigate`エンドポイント1本。`X-API-Key`ヘッダで簡易認証（`AGENT_SDK_API_KEY`環境変数と照合、不一致は401）
+  - `ClaudeAgentOptions(cwd=agent-wrapperディレクトリ, setting_sources=["project"], allowed_tools=["WebSearch"], max_turns=10, model="claude-sonnet-5", effort="high", system_prompt={"type":"preset","preset":"claude_code","append":タスクプロンプト})`
+  - `CLAUDE.md`: 指令書通りの「編集者」ロール・出力ルール・配慮事項
+  - 失敗時（`ResultMessage.is_error`が`True`、または`max_turns`到達等で例外発生）は`HTTPException(502)`を返す。空文字列/nullを200で返すことはない
+  - 依存: `fastapi`, `uvicorn[standard]`, `claude-agent-sdk`（`requirements.txt`）
+- **data-collector側（Rust）**
+  - `ports/agent_port.rs`: `AgentPort` trait新設（`investigate() -> Result<String>`）
+  - `adapters/agent.rs`: `AgentClient`（reqwest、タイムアウト1200秒、`X-API-Key`ヘッダ付きPOST、`error_for_status()`で4xx/5xxをErrに変換）
+  - `ports/memo_writer.rs` / `adapters/postgres.rs`: `insert_agent_memo(memo)`追加（`source='agent'`固定、重複排除テーブルなし、トランザクション不要）
+  - `config::build_app()`: 戻り値タプル末尾に`AgentClient`を追加（`(YoutubePort, AiGenerator, MemoWriter, QiitaPort, AgentPort)`、`app.0`〜`app.3`の参照は不変）。新規環境変数`AGENT_SDK_URL` / `AGENT_SDK_API_KEY`
+  - `main.rs`: YouTube→Qiitaループの後にAgent呼び出しを追加。失敗しても他ソースの処理には影響しない。`success_count`/`failure_count`に合流
+  - `cargo check`（オフライン含む）、`cargo sqlx prepare`実行済み・`.sqlx/`キャッシュ更新済み
+
+### 動作確認結果（ローカル、実施済み）
+
+ユーザーの`CLAUDE_CODE_OAUTH_TOKEN`（`claude setup-token`発行済み）を一時的にローカル環境変数として使い、agent-wrapperを`uvicorn`でローカル起動して検証。
+
+1. 誤った`X-API-Key`で401が返ることを確認
+2. 正しいキーで`POST /investigate`を実行 → 200 OKで日本語メモが返ることを確認。**1回目はAgentの最終応答に「メモを作成しました」等の前置き・見出しが混入する問題を発見**。タスクプロンプトに「出力フォーマット（重要）」セクションを追記（最後の発言＝メモ本文のみ、前置き・見出し・選定理由の説明を含めないことを明記）し修正
+3. 修正後に再実行 → メモ本文のみ（例:「NVIDIA全社エンジニアがAI活用でコード量3倍なのにバグは増えてないらしくて気になる」、43文字）がクリーンに返り、CLAUDE.mdの編集者視点・感想の形のルールにも合致していることを確認
+4. `max_turns=1`に強制した失敗ケースで「Reached maximum number of turns (1)」の例外が送出され、`/investigate`が502を返すことを確認（`run_investigation()`内で`ResultMessage.is_error`判定を経由）
+
+### 残課題
+
+- **Web検索ツールの課金がサブスク枠内かどうかの実測**: 今回のタスクではスコープ外（指令書通り）。実装は完了したので、次回はRailwayデプロイ後に少額の実行を重ねてAnthropicの請求実績で確認すること
+- Railway側の3つ目のサービスとしてのデプロイ未実施（`CLAUDE_CODE_OAUTH_TOKEN`のみ設定・`ANTHROPIC_API_KEY`は絶対に設定しないことを徹底）
+- Railway側cronスケジュール設定は別途（スコープ外）
+- data-collector側の`.env`に`AGENT_SDK_URL` / `AGENT_SDK_API_KEY`をローカル用に追記していない（Railwayデプロイ後、ローカル開発時は本番URLかローカル起動したagent-wrapperのURLを設定する）
+- `main.rs`の`total`件数カウントにAgent分の1件を加算する形にした（YouTube/Qiitaの件数ログと揃える判断）。指令書に明記がなかった箇所のため、意図と異なる場合は要調整

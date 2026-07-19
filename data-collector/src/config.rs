@@ -6,11 +6,13 @@ use crate::ports::memo_writer::MemoWriter;
 use crate::adapters::postgres::PostgresClient;
 use crate::ports::qiita_port::QiitaPort;
 use crate::adapters::qiita::QiitaClient;
+use crate::ports::agent_port::AgentPort;
+use crate::adapters::agent::AgentClient;
 use anyhow::Result;
 use std::env;
 
 
-pub async fn build_app() -> Result<(impl YoutubePort, impl AiGenerator, impl MemoWriter, impl QiitaPort)> {
+pub async fn build_app() -> Result<(impl YoutubePort, impl AiGenerator, impl MemoWriter, impl QiitaPort, impl AgentPort)> {
     //一旦envファイルを読み込む
     dotenvy::dotenv().ok();
     let youtube_client = YoutubeClient::new(
@@ -23,6 +25,10 @@ pub async fn build_app() -> Result<(impl YoutubePort, impl AiGenerator, impl Mem
         &std::env::var("DATABASE_URL").expect("DATABASE_URL が設定されていません")
     ).await?;
     let qiita_client = QiitaClient::new();
+    let agent_client = AgentClient::new(
+        env::var("AGENT_SDK_URL").expect("AGENT_SDK_URL が設定されていません"),
+        env::var("AGENT_SDK_API_KEY").expect("AGENT_SDK_API_KEY が設定されていません"),
+    );
 
-    Ok((youtube_client, openai_client, memo_repo, qiita_client))
+    Ok((youtube_client, openai_client, memo_repo, qiita_client, agent_client))
 }

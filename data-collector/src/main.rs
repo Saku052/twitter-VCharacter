@@ -4,7 +4,7 @@ mod adapters;
 mod domain;
 
 use config::build_app;
-use crate::ports::{ai_generator::AiGenerator, youtube_port::YoutubePort, memo_writer::MemoWriter, qiita_port::QiitaPort};
+use crate::ports::{ai_generator::AiGenerator, youtube_port::YoutubePort, memo_writer::MemoWriter, qiita_port::QiitaPort, agent_port::AgentPort};
 
 const MODEL: &str = "gpt-4o-mini";
 const SYSTEM: &str = "<role>さく担当の編集者。ネタ元を読んで、さくが話したくなりそうなポイントだけ抜き出す</role>
@@ -119,7 +119,28 @@ async fn main() {
         }
     }
 
-    let total = youtube_total + qiita_total;
+    // Agent SDK処理
+    match app.4.investigate().await {
+        Ok(memo) => {
+            match app.2.insert_agent_memo(&memo).await {
+                Ok(()) => {
+                    println!("Agent由来メモを保存しました");
+                    success_count += 1;
+                }
+                Err(e) => {
+                    eprintln!("Agent由来メモのmemo_mqへの書き込みに失敗: {:?}", e);
+                    failure_count += 1;
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Agent調査に失敗: {:?}", e);
+            failure_count += 1;
+        }
+    }
+
+    let agent_total = 1; // Agent調査は1バッチ=1件の試行として数える
+    let total = youtube_total + qiita_total + agent_total;
     println!("バッチ終了: {}件中{}件成功", total, success_count);
 
     if failure_count > 0 && success_count == 0 {

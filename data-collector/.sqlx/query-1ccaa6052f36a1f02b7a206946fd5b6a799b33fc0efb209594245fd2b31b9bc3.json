@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO memo_mq (memo, source) VALUES ($1, 'agent')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1ccaa6052f36a1f02b7a206946fd5b6a799b33fc0efb209594245fd2b31b9bc3"
+}

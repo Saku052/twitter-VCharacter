@@ -71,4 +71,14 @@ impl MemoWriter for PostgresClient {
         .await?;
         Ok(row.exists)
     }
+
+    async fn insert_agent_memo(&self, memo: &str) -> Result<()> {
+        sqlx::query!(
+            "INSERT INTO memo_mq (memo, source) VALUES ($1, 'agent')",
+            memo
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
 }
