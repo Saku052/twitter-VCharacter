@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO memo_mq (memo, source) VALUES ($1, 'youtube')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e082b15d8547c650e18b0ba987db1a749b78524c429c095c6f051fb228433eaa"
+}

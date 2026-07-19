@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO memo_mq (memo) VALUES ($1)",
+  "query": "INSERT INTO memo_mq (memo, source) VALUES ($1, 'qiita')",
   "describe": {
     "columns": [],
     "parameters": {
@@ -10,5 +10,5 @@
     },
     "nullable": []
   },
-  "hash": "d50fc65b5044554f03cb74bfb2385df005d817e77a9355e57c4e7f9cc43fd63a"
+  "hash": "4d71d9bfc1359f542dd246d3b32050f615bd27f4ccf02408005b16e3c28070cd"
 }

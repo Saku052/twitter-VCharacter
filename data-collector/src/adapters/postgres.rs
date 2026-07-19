@@ -24,9 +24,12 @@ impl MemoWriter for PostgresClient {
         )
         .execute(&mut *tx)
         .await?;
-        sqlx::query!("INSERT INTO memo_mq (memo) VALUES ($1)", memo)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query!(
+            "INSERT INTO memo_mq (memo, source) VALUES ($1, 'youtube')",
+            memo
+        )
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         Ok(())
     }
@@ -35,6 +38,34 @@ impl MemoWriter for PostgresClient {
         let row = sqlx::query!(
             "SELECT EXISTS(SELECT 1 FROM processed_videos WHERE video_id = $1) AS \"exists!\"",
             video_id
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.exists)
+    }
+
+    async fn insert_qiita_memo(&self, memo: &str, article_id: &str) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query!(
+            "INSERT INTO processed_qiita_items (article_id) VALUES ($1) ON CONFLICT DO NOTHING",
+            article_id
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query!(
+            "INSERT INTO memo_mq (memo, source) VALUES ($1, 'qiita')",
+            memo
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn is_qiita_processed(&self, article_id: &str) -> Result<bool> {
+        let row = sqlx::query!(
+            "SELECT EXISTS(SELECT 1 FROM processed_qiita_items WHERE article_id = $1) AS \"exists!\"",
+            article_id
         )
         .fetch_one(&self.pool)
         .await?;
