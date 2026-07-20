@@ -6,6 +6,8 @@ mod config;
 use config::build_app;
 use domain::post::{parse_tags, prepare_post};
 use ports::ai_generator::AiGenerator;
+use ports::image_generator::ImageGenerator;
+use ports::media_uploader::MediaUploader;
 use ports::memo_queue::MemoQueue;
 use ports::text_publisher::TextPublisher;
 
@@ -28,6 +30,12 @@ const TAG_SYS_PRPT: &str = "<role>技術が好きな社会人1年目のエンジ
 - 説明文や前置きは付けず、タグの文字列のみを出力する
 </rules>";
 
+const IMAGE_PROMPT_TEMPLATE: &str = "以下のメモの雰囲気を表す、シンプルで温かみのあるイラスト画像を1枚生成してください。
+文字は入れないでください。技術系VTuberのツイート添付を想定した、
+柔らかい色合いのフラットイラスト風。
+
+メモ: {memo}";
+
 #[tokio::main]
 async fn main() {
     // Clientの組み立てはconfig.rsに任せる
@@ -49,8 +57,33 @@ async fn main() {
     // 文章を準備
     let post = prepare_post(body, tags);
 
+    // 画像生成（確率判定。失敗時は画像なしで投稿続行）
+    let probability: f64 = std::env::var("IMAGE_POST_PROBABILITY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.3);
+
+    let media_ids = if rand::random::<f64>() < probability {
+        let image_prompt = IMAGE_PROMPT_TEMPLATE.replace("{memo}", &memo_text);
+        match generator.generate_image(&image_prompt).await {
+            Ok(image_bytes) => match publisher.upload_media(&image_bytes).await {
+                Ok(media_id) => Some(vec![media_id]),
+                Err(e) => {
+                    eprintln!("画像アップロード失敗、テキストのみで続行: {}", e);
+                    None
+                }
+            },
+            Err(e) => {
+                eprintln!("画像生成失敗、テキストのみで続行: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // 投稿
-    match publisher.post_text(&post).await {
+    match publisher.post_text(&post, media_ids).await {
         Ok(_) => {
             memo_repo.mark_used_memo(memoid).await.expect("メモの更新に失敗");
             println!("完了！")

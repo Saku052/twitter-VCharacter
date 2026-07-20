@@ -15,3 +15,6 @@ __pycache__/
 # まだ作成中のアーキテクチャ
 *.drawio
 *.jsonl
+
+# 検証・PoC用の一時成果物
+scratch/

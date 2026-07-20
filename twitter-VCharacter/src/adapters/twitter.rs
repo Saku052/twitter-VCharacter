@@ -2,10 +2,12 @@ use anyhow::Result;
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use hmac::{Hmac, Mac, KeyInit};
+use reqwest::multipart;
 use reqwest::Client;
 use sha2::Sha256;
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
+use crate::ports::media_uploader::MediaUploader;
 use crate::ports::text_publisher::TextPublisher;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -87,10 +89,14 @@ impl TwitterClient {
 
 #[async_trait]
 impl TextPublisher for TwitterClient {
-    async fn post_text(&self, content: &str) -> Result<()> {
+    async fn post_text(&self, content: &str, media_ids: Option<Vec<String>>) -> Result<()> {
         let url = "https://api.twitter.com/2/tweets";
         let auth_header = self.build_oauth_header("POST", url)?;
-        let body = serde_json::json!({ "text": content });
+
+        let mut body = serde_json::json!({ "text": content });
+        if let Some(ids) = media_ids {
+            body["media"] = serde_json::json!({ "media_ids": ids });
+        }
 
         let response = self
             .client
@@ -109,6 +115,41 @@ impl TextPublisher for TwitterClient {
             let text = response.text().await?;
             anyhow::bail!("投稿失敗 ({}): {}", status, text);
         }
+    }
+}
+
+#[async_trait]
+impl MediaUploader for TwitterClient {
+    async fn upload_media(&self, image: &[u8]) -> Result<String> {
+        let url = "https://api.x.com/2/media/upload";
+        let auth_header = self.build_oauth_header("POST", url)?;
+
+        let part = multipart::Part::bytes(image.to_vec()).file_name("image.png");
+        let form = multipart::Form::new()
+            .text("media_category", "tweet_image")
+            .part("media", part);
+
+        let response = self
+            .client
+            .post(url)
+            .header("Authorization", auth_header)
+            .multipart(form)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await?;
+            anyhow::bail!("画像アップロード失敗 ({}): {}", status, text);
+        }
+
+        let body: serde_json::Value = response.json().await?;
+        let media_id = body["data"]["id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("media/uploadのレスポンスが不正です"))?
+            .to_string();
+
+        Ok(media_id)
     }
 }
 

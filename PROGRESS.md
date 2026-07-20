@@ -102,6 +102,83 @@ let post = prepare_post(body, tags);
 - **タグが0件の場合、投稿末尾に不自然な空行が残る**: `parse_tags`が空`Vec`を返すと`prepare_post`は本文の後に空行だけが付いた投稿を組み立てる。エラー化や空行除去は未対応
 - 画像生成機能の設計は次フェーズで改めて検討
 
+## Phase4（実装完了）
+
+**ゴール**: 一部のツイートに画像を添付する機能を追加する。Phase3.5で本文/タグ生成を分離したのは、この画像生成を見据えた布石だった。
+
+### 決定事項（確定）
+
+- **適用範囲**: 全投稿ではなく、一部の投稿のみ画像付き（ランダム条件、一定確率）。確率は環境変数で調整可能にする。目安3割前後（仮）
+- **生成タイミング**: producer側（data-collector）での事前生成ではなく、**consumer側（twitter-VCharacter）で都度判定・生成**する。ランダム条件はメモ内容やsourceに依存しないため、使われないメモに事前生成コストをかけるのは非効率という判断
+- **画像生成AI**: OpenAI `gpt-image-2`。既存の`OPENAI_API_KEY`をそのまま流用できる（新規契約不要）
+- **画像の方向性**: 「メモ内容を簡潔な図解・インフォグラフィックにまとめる方向（diagram）」「メモの雰囲気を表すシンプルなイラスト（simple）」の**両方を選択肢として持つ**。`gpt-image-2`ではdiagram方向でも日本語テキストが正確に描画されることを確認済み（後述のPoC結果）。どちらを使うか（都度ランダム/固定/メモ内容依存）は実装時に詰める
+- **画像生成失敗時の挙動**: 画像生成・Xへのアップロードのどちらが失敗しても、**画像なしテキストのみで投稿を続行**する（その回は画像添付をスキップするだけで、投稿自体は中断しない）。Phase1〜3で確立した「1機能の失敗が全体を止めない」方針をそのまま踏襲
+- **Xメディアアップロード実装**: 既存の`TwitterClient`（OAuth 1.0a自前実装、[twitter.rs](twitter-VCharacter/src/adapters/twitter.rs)）を拡張する方針。新規クレートへの切り替えは行わない。`POST https://api.x.com/2/media/upload`を呼び出す実装を追加する必要がある
+- **port設計**: 新規に`ImageGenerator` trait（`generate_image(prompt: &str) -> Result<Vec<u8>>`のようなシグネチャ）を切る。既存`AiGenerator`（テキスト生成、`String`を返す）とは戻り値の型が根本的に異なるため、ISPに従い分離する。`OpenAiClient`が両方のtraitを実装する形も可
+- **画像生成プロンプトの入力**: 元のメモ（`memo_text`）をそのまま使う。生成済みの本文（body）を経由しない。body/tags生成と同じ「メモ→独立した成果物」という並びに揃える。「本文と画像が意味的に一体となった投稿」という将来像はあるが、今回のスコープでは扱わない（将来課題として明示）
+
+### PoC結果（実施済み、2026-07-20）
+
+Rustに組み込む前に、Pythonの検証スクリプトでOpenAI画像生成API・X APIを直接呼び出し、`memo_mq`の実メモ2件（ID99: YouTube由来「ClaudeCode」関連、ID104: Qiita由来「マルチエージェント手法」関連）を使ってプロンプト品質・API疎通を検証した。
+
+**画像生成（`gpt-image-1` vs `gpt-image-2`）**:
+- `gpt-image-1`ではsimple方向（雰囲気イラスト）は2件とも良好だったが、diagram方向（図解）は2件とも実用不可。本文相当の日本語テキストが「力齡た齡佳」「白カ〇得雅に鹿り人れだい」のように文字化け・崩壊した
+- 同じOpenAI API・同じ`OPENAI_API_KEY`のまま、モデル名を`gpt-image-2`に変えるだけでdiagram方向を再検証したところ、2件とも**日本語テキストが完全に正確に描画**され、タイトル・3ステップの図解・説明文まで崩れなく生成された。実用レベルと判断し、diagram方向も選択肢に復帰させた
+
+**X API疎通確認**:
+- `POST https://api.x.com/2/media/upload`が、既存のOAuth 1.0a資格情報・現行のXプランで追加設定なしに200で成功することを確認済み（`media_category: tweet_image`指定、Python `requests_oauthlib`で検証）
+- 取得した`media_id`を使い、`POST https://api.x.com/2/tweets`に`media.media_ids`を含めて**本番アカウントで実際に画像付きツイート投稿し、201 Createdで成功**することを確認済み
+
+PoCで生成した画像は[scratch/phase4_poc/](scratch/phase4_poc/)に保存済み（`.gitignore`で`scratch/`除外設定済み、リポジトリには含まれない）。
+
+### 実装時に検証・確定が必要な事項
+
+- **既存のOAuth 1.0a自前実装（[twitter.rs](twitter-VCharacter/src/adapters/twitter.rs)）が`media/upload`のmultipartリクエストにそのまま対応できるか未検証**。PoCでの疎通確認は別ライブラリ（Python `requests_oauthlib`）で行っており、既存の自前HMAC-SHA256署名ロジック（クエリ・ボディを署名対象に含まない簡易実装）がmultipart form-dataでも同様に通るかは、Rust実装時に確認が必要
+- 画像付き確率の環境変数名・デフォルト値（例: `IMAGE_POST_PROBABILITY`）
+- `IMAGE_SYS_PRPT`（画像生成用プロンプト）の具体的な文面、および simple/diagram の使い分けロジック
+- `ports::text_publisher::TextPublisher::post_text(content: &str)`は画像を扱えないため、シグネチャ変更または新規メソッド追加が必要（例: `post_text_with_image(content: &str, image: Vec<u8>)`）。既存の`post_text`のみの呼び出し元（`main.rs`）との整合を取る設計が必要
+- `gpt-image-2`の`quality`/`size`パラメータの本番設定値（PoCでは`quality=low, size=1024x1024`を使用）
+- `config::build_app()`統合方法（戻り値タプルへの`ImageGenerator`追加）と関連環境変数
+
+### スコープ外・将来課題として明示
+
+- 「本文と画像が意味的に一体」となるような生成フロー（本文→画像の逐次生成等）。今回は本文生成と画像生成を完全に独立させる
+- 既存の残課題（本文+タグ結合後の140字超過チェック、タグ0件時の空行）— Phase4のスコープには含めない
+- 障害通知・アラートの仕組み（Phase1から継続の未解決事項）
+
+### 参考: 調査済みの技術情報
+
+- OpenAI画像生成APIは`POST https://api.openai.com/v1/images/generations`。GPT画像モデル（`gpt-image-1`/`gpt-image-2`系）は常にbase64（`b64_json`）でレスポンスを返す（`url`は返らない）
+- X側は投稿エンドポイント（`POST /2/tweets`）とは別に、`POST /2/media/upload`で先に画像をアップロードして`media_id`を取得し、投稿時に`media.media_ids`として添付する2段階構成が必要。1投稿に画像は最大4枚まで添付可能
+
+### 実装内容（完了）
+
+`HANDOFF_PHASE4.md`の指令書通りに実装。指令書は実装完了に伴い削除済み。
+
+- **port設計**: `ImageGenerator`（`ports/image_generator.rs`、`generate_image(prompt: &str) -> Result<Vec<u8>>`）と`MediaUploader`（`ports/media_uploader.rs`、`upload_media(image: &[u8]) -> Result<String>`）を新規に分離。「画像バイナリの生成」と「Xへのアップロード」は責務が異なるため、同じtraitにまとめなかった
+- **`OpenAiClient`**（[adapters/openai.rs](twitter-VCharacter/src/adapters/openai.rs)）: `ImageGenerator`を追加実装。`gpt-image-2`固定、`size=1024x1024`, `quality=low`、レスポンスの`b64_json`を`base64`crateでデコードして返す
+- **`TwitterClient`**（[adapters/twitter.rs](twitter-VCharacter/src/adapters/twitter.rs)）: `MediaUploader`を追加実装。`POST https://api.x.com/2/media/upload`にmultipart/form-data（`reqwest::multipart`）で送信し`media_id`を取得。既存の`build_oauth_header`（URLのみを署名対象とする簡易実装）をそのまま流用し、追加対応なしで動作した
+- **`TextPublisher::post_text`**: シグネチャを`post_text(content: &str, media_ids: Option<Vec<String>>)`に変更。`media_ids`がある場合はJSONボディに`media.media_ids`を追加
+- **`config::build_app()`の戻り値型**: 指令書は4要素タプル（`ImageGenerator`実装を別枠で追加、`Clone`が必要になる想定）を提案していたが、`OpenAiClient`が`AiGenerator + ImageGenerator`を、`TwitterClient`が`TextPublisher + MediaUploader`を同一インスタンスで実装しているため、既存の3要素タプルのまま各要素の型を`impl TraitA + TraitB`にまとめる形にした。`Clone`導出は不要
+- **`main.rs`**: `IMAGE_POST_PROBABILITY`（デフォルト0.3）で確率判定→該当すれば`generate_image`→`upload_media`、いずれかが失敗すれば`None`にフォールバックしテキストのみで`post_text`を呼ぶ
+- **画像プロンプト**: 指令書5章のsimple方向テンプレートを`IMAGE_PROMPT_TEMPLATE`定数として`main.rs`に固定採用（`{memo}`をメモ本文で置換）。diagram方向は今回実装せず、使い分けロジックも設けていない（指令書1章の「迷ったら固定から始めてよい」を採用）
+
+### 動作確認結果（本番アカウントで実施済み）
+
+`cargo check` / `cargo test`（既存6件）通過を確認後、`memo_mq`の未使用メモを使って`cargo run`を3パターン実行。
+
+1. `IMAGE_POST_PROBABILITY=1.0`: 画像生成→アップロード→画像付きツイート投稿が成功（「投稿成功」ログ、X API 201相当のレスポンス）
+2. `IMAGE_POST_PROBABILITY=0.0`: 画像処理をスキップし、従来通りテキストのみの投稿が成功
+3. 画像生成失敗ケース: `OPENAI_IMAGE_API_URL`を一時的に無効なURLに差し替えて意図的に404を発生させ、「画像生成失敗、テキストのみで続行」のログ出力後、テキストのみで投稿が最後まで成功することを確認（確認後は元のURLに戻し`cargo check`再通過を確認済み）
+
+なお、失敗時フォールバックの検証は環境変数の差し替え（`OPENAI_API_KEY`や`TWITTER_API_KEY`を無効化する方式）では成立しなかった。`OPENAI_API_KEY`は本文生成にも使われるため無効化すると本文生成の`.expect()`でパニックし、`TWITTER_API_KEY`は投稿本体の認証にも使われるため無効化すると画像アップロード失敗後の投稿自体も401で失敗する。画像生成エンドポイントのURLのみを一時的に壊す方法で、image生成だけの単独失敗を切り分けて確認した。
+
+### 残課題
+
+- OAuth 1.0a署名のmultipart対応は「追加対応不要でそのまま動いた」ことを実測確認したのみで、署名ベース文字列の理論的な正しさ（RFC 5849上multipartボディを署名対象外とする扱いで一貫しているか等）を厳密に検証したわけではない。現状の簡易署名実装（クエリ・ボディ非対応）に起因する将来的な別エンドポイント対応時は都度実測での確認が必要
+- simple/diagram方向の使い分けロジックは実装していない。simple方向に固定し、diagram方向は未実装（指令書1章で許容された進め方）
+- 既存の残課題（本文+タグ結合後の140字超過チェック、タグ0件時の空行、障害通知の仕組み）は今回も対応なし（スコープ外として明示済み）
+
 ## data-collector
 
 **現フェーズ: 開発速度優先。方針が明確な変更はClaudeが直接実装する。**
