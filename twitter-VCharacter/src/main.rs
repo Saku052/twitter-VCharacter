@@ -4,7 +4,7 @@ mod adapters;
 mod config;
 
 use config::build_app;
-use domain::post::{parse_tags, prepare_post};
+use domain::post::{parse_image_post_probability, parse_tags, prepare_post, should_attach_image};
 use ports::ai_generator::AiGenerator;
 use ports::image_generator::ImageGenerator;
 use ports::media_uploader::MediaUploader;
@@ -58,12 +58,9 @@ async fn main() {
     let post = prepare_post(body, tags);
 
     // 画像生成（確率判定。失敗時は画像なしで投稿続行）
-    let probability: f64 = std::env::var("IMAGE_POST_PROBABILITY")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0.3);
+    let probability = parse_image_post_probability(std::env::var("IMAGE_POST_PROBABILITY").ok());
 
-    let media_ids = if rand::random::<f64>() < probability {
+    let media_ids = if should_attach_image(rand::random::<f64>(), probability) {
         let image_prompt = IMAGE_PROMPT_TEMPLATE.replace("{memo}", &memo_text);
         match generator.generate_image(&image_prompt).await {
             Ok(image_bytes) => match publisher.upload_media(&image_bytes).await {

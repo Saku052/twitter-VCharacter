@@ -10,11 +10,17 @@ const IMAGE_MODEL: &str = "gpt-image-2";
 
 pub struct OpenAiClient {
     api_key: String,
+    image_api_url: String,
 }
 
 impl OpenAiClient {
     pub fn new(api_key: String) -> Self {
-        Self { api_key }
+        Self { api_key, image_api_url: OPENAI_IMAGE_API_URL.to_string() }
+    }
+
+    #[cfg(test)]
+    fn with_image_api_url(api_key: String, image_api_url: String) -> Self {
+        Self { api_key, image_api_url }
     }
 }
 
@@ -58,7 +64,7 @@ impl ImageGenerator for OpenAiClient {
         let client = reqwest::Client::new();
 
         let response = client
-            .post(OPENAI_IMAGE_API_URL)
+            .post(&self.image_api_url)
             .bearer_auth(&self.api_key)
             .json(&serde_json::json!({
                 "model": IMAGE_MODEL,
@@ -83,5 +89,65 @@ impl ImageGenerator for OpenAiClient {
 
         let image_bytes = STANDARD.decode(b64)?;
         Ok(image_bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::{MockServer, Mock, ResponseTemplate};
+    use wiremock::matchers::method;
+
+    #[tokio::test]
+    async fn generate_image_decodes_base64_response_into_bytes() {
+        let mock_server = MockServer::start().await;
+
+        let original_bytes = b"fake-png-bytes";
+        let b64 = STANDARD.encode(original_bytes);
+        let response_body = serde_json::json!({
+            "data": [ { "b64_json": b64 } ]
+        });
+
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response_body))
+            .mount(&mock_server)
+            .await;
+
+        let client = OpenAiClient::with_image_api_url("dummy-key".to_string(), mock_server.uri());
+        let image_bytes = client.generate_image("テストプロンプト").await.unwrap();
+
+        assert_eq!(image_bytes, original_bytes.to_vec());
+    }
+
+    #[tokio::test]
+    async fn generate_image_errors_when_b64_json_field_is_missing() {
+        let mock_server = MockServer::start().await;
+
+        let response_body = serde_json::json!({ "data": [ {} ] });
+
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response_body))
+            .mount(&mock_server)
+            .await;
+
+        let client = OpenAiClient::with_image_api_url("dummy-key".to_string(), mock_server.uri());
+        let result = client.generate_image("テストプロンプト").await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn generate_image_errors_on_non_success_status() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("internal error"))
+            .mount(&mock_server)
+            .await;
+
+        let client = OpenAiClient::with_image_api_url("dummy-key".to_string(), mock_server.uri());
+        let result = client.generate_image("テストプロンプト").await;
+
+        assert!(result.is_err());
     }
 }

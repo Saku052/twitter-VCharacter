@@ -12,12 +12,15 @@ use crate::ports::text_publisher::TextPublisher;
 
 type HmacSha256 = Hmac<Sha256>;
 
+const DEFAULT_MEDIA_UPLOAD_URL: &str = "https://api.x.com/2/media/upload";
+
 pub struct TwitterClient {
     api_key: String,
     api_secret: String,
     access_token: String,
     access_token_secret: String,
     client: Client,
+    media_upload_url: String,
 }
 
 impl TwitterClient {
@@ -33,6 +36,25 @@ impl TwitterClient {
             access_token,
             access_token_secret,
             client: Client::new(),
+            media_upload_url: DEFAULT_MEDIA_UPLOAD_URL.to_string(),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_media_upload_url(
+        api_key: String,
+        api_secret: String,
+        access_token: String,
+        access_token_secret: String,
+        media_upload_url: String,
+    ) -> Self {
+        Self {
+            api_key,
+            api_secret,
+            access_token,
+            access_token_secret,
+            client: Client::new(),
+            media_upload_url,
         }
     }
 
@@ -121,7 +143,7 @@ impl TextPublisher for TwitterClient {
 #[async_trait]
 impl MediaUploader for TwitterClient {
     async fn upload_media(&self, image: &[u8]) -> Result<String> {
-        let url = "https://api.x.com/2/media/upload";
+        let url = &self.media_upload_url;
         let auth_header = self.build_oauth_header("POST", url)?;
 
         let part = multipart::Part::bytes(image.to_vec()).file_name("image.png");
@@ -173,4 +195,82 @@ fn rand_nonce() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .subsec_nanos() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::{MockServer, Mock, ResponseTemplate, Request};
+    use wiremock::matchers::{method, header_exists};
+
+    fn test_client(media_upload_url: String) -> TwitterClient {
+        TwitterClient::with_media_upload_url(
+            "api-key".to_string(),
+            "api-secret".to_string(),
+            "access-token".to_string(),
+            "access-token-secret".to_string(),
+            media_upload_url,
+        )
+    }
+
+    #[tokio::test]
+    async fn upload_media_sends_multipart_body_and_returns_media_id() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(header_exists("Authorization"))
+            .respond_with(|req: &Request| {
+                let body_str = String::from_utf8_lossy(&req.body).to_string();
+                assert!(body_str.contains("name=\"media_category\""), "media_categoryフィールドが送られていない");
+                assert!(body_str.contains("tweet_image"), "media_categoryの値がtweet_imageでない");
+                assert!(body_str.contains("name=\"media\""), "mediaパートが送られていない");
+                assert!(
+                    req.headers.get("authorization").is_some(),
+                    "Authorizationヘッダがない"
+                );
+                let auth_value = req.headers.get("authorization").unwrap().to_str().unwrap();
+                assert!(auth_value.starts_with("OAuth "), "OAuth形式のAuthorizationヘッダでない");
+
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "data": { "id": "1234567890" }
+                }))
+            })
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(mock_server.uri());
+        let media_id = client.upload_media(b"fake-image-bytes").await.unwrap();
+
+        assert_eq!(media_id, "1234567890");
+    }
+
+    #[tokio::test]
+    async fn upload_media_errors_when_media_id_field_is_missing() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": {} })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(mock_server.uri());
+        let result = client.upload_media(b"fake-image-bytes").await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn upload_media_errors_on_non_success_status() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(413).set_body_string("payload too large"))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(mock_server.uri());
+        let result = client.upload_media(b"fake-image-bytes").await;
+
+        assert!(result.is_err());
+    }
 }
