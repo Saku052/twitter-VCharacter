@@ -5,11 +5,20 @@ use crate::ports::qiita_port::QiitaPort;
 use crate::domain::QiitaArticle;
 use anyhow::Result;
 
-pub struct QiitaClient;
+const DEFAULT_BASE_URL: &str = "https://qiita.com/api/v2";
+
+pub struct QiitaClient {
+    base_url: String,
+}
 
 impl QiitaClient {
     pub fn new() -> Self {
-        Self
+        Self { base_url: DEFAULT_BASE_URL.to_string() }
+    }
+
+    #[cfg(test)]
+    fn with_base_url(base_url: String) -> Self {
+        Self { base_url }
     }
 }
 
@@ -23,7 +32,7 @@ impl QiitaPort for QiitaClient {
         let query = format!("stocks:>20 stocks:<50 created:>{}", five_days_ago);
 
         let response = client
-            .get("https://qiita.com/api/v2/items")
+            .get(format!("{}/items", self.base_url))
             .query(&[
                 ("query", query.as_str()),
                 ("page", "1"),
@@ -57,4 +66,57 @@ struct QiitaItem {
     id: String,
     title: String,
     body: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::{MockServer, Mock, ResponseTemplate};
+    use wiremock::matchers::{method, path};
+
+    #[tokio::test]
+    async fn truncates_body_to_300_chars_without_panicking_on_multibyte_boundary() {
+        let mock_server = MockServer::start().await;
+
+        let long_body: String = "あ".repeat(500);
+        let response_body = serde_json::json!([
+            {
+                "id": "test-article-1",
+                "title": "テスト記事",
+                "body": long_body
+            }
+        ]);
+
+        Mock::given(method("GET"))
+            .and(path("/items"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response_body))
+            .mount(&mock_server)
+            .await;
+
+        let client = QiitaClient::with_base_url(mock_server.uri());
+        let articles = client.fetch_trending_articles().await.unwrap();
+
+        assert_eq!(articles.len(), 1);
+        assert_eq!(articles[0].body_excerpt.chars().count(), 300);
+    }
+
+    #[tokio::test]
+    async fn keeps_body_as_is_when_shorter_than_300_chars() {
+        let mock_server = MockServer::start().await;
+        let short_body = "短い本文です。".to_string();
+        let response_body = serde_json::json!([
+            { "id": "test-article-2", "title": "短い記事", "body": short_body.clone() }
+        ]);
+
+        Mock::given(method("GET"))
+            .and(path("/items"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response_body))
+            .mount(&mock_server)
+            .await;
+
+        let client = QiitaClient::with_base_url(mock_server.uri());
+        let articles = client.fetch_trending_articles().await.unwrap();
+
+        assert_eq!(articles[0].body_excerpt, short_body);
+    }
 }

@@ -11,6 +11,97 @@
 - Twitter投稿で401 Unauthorizedが出ることがある（APIキー権限の確認が必要）
 - `memo_mq.memo` カラムにNOT NULL制約をつけるか検討（現在は`Option<String>` + `unwrap_or_default()`で対応）
 
+## Phase3.5（実装完了）
+
+**ゴール**: 現状`main.rs`で「メモ→ツイート文（本文+ハッシュタグ）」を1回のAI呼び出しで生成している構造を、「メモ→本文」「メモ→タグ」の2回の独立した生成ステップに分離する。
+
+**動機**: 将来の画像生成機能（メモから画像を生成するステップの追加）を見据え、「メモから複数の異なる成果物を生成する」という構造への布石。ただし今回のスコープでは画像生成自体の設計は行わず、本文・タグの2分割のみに留める（Option A採用、汎用的な生成器抽象は今回作らない。画像生成の要件が固まってから改めて検討する）。
+
+### 決定事項（確定）
+
+- **分割対象**: 本文生成とタグ生成の2つのみ。画像生成を見据えた汎用port設計（例: `ContentGenerator`のような抽象）は**今回は作らない**（過剰設計を避ける）
+- **AI呼び出し回数**: 1回→2回に増やす。コスト・レイテンシの増加（約2倍）は許容する
+- **文字数制限**: 本文は**140字以内**（従来通り、ハッシュタグは含まない）。タグは別枠（具体的な上限文字数は今回定めない、1〜2個程度を想定）
+- **結合ロジックの配置**: `domain::post::prepare_post`に集約する。シグネチャを`prepare_post(content: String) -> String`から`prepare_post(body: String, tags: String) -> String`に変更し、本文・タグを結合して最終的な投稿テキストを組み立てる責務をdomain層に持たせる（`main.rs`側で直接`format!`しない）
+- **タグ生成AIへの入力**: メモのみ（生成済み本文は渡さない）。本文生成とタグ生成は互いに独立し、入力が同じメモのみのため並列実行（`tokio::join!`等）が可能な設計にする
+
+### SYSTEMプロンプト（確定）
+
+現行の`SYS_PRPT`（本文+タグを1回で生成）を、以下の2つに分割する。
+
+**本文生成用**:
+```
+<role>技術が好きな社会人1年目のエンジニア</role>
+<task>渡されたメモを元に、本人視点のツイート本文を生成する</task>
+<rules>
+- 140字以内
+- ハッシュタグは含めない（別途生成するため）
+- 砕けた口語（「〜なんだよな」「〜じゃん」「〜かもしれない」など）と断定調を内容に応じて使い分け
+- 絵文字は0〜2個、内容に応じて自然に配置
+- 自慢や説教にならず、気づきや失敗を等身大で書く
+</rules>
+```
+
+**タグ生成用**:
+```
+<role>技術が好きな社会人1年目のエンジニア</role>
+<task>渡されたメモを元に、ツイートに付けるハッシュタグを考える</task>
+<rules>
+- 内容に関連するハッシュタグを1〜2個
+- 「#」を付けた状態で、スペース区切りで出力する（例: #Rust #個人開発）
+- 説明文や前置きは付けず、ハッシュタグの文字列のみを出力する
+</rules>
+```
+
+出力形式は「AIにスペース区切りの文字列（例: `#Rust #個人開発`）をそのまま出力させる」方式を採用。Rust側で配列にパースし直す等の追加処理は行わない（プロンプトの`<rules>`で形式を固定することで担保する）。
+
+### 実装方針（確定）
+
+- **`AiGenerator`のシグネチャ**: 変更しない。現状の`generate(memo, model, system)`のまま、`main.rs`から本文用・タグ用のプロンプト定数を渡して2回呼び出す。専用メソッド（`generate_body`/`generate_tags`等）は追加しない。理由: 現状の設計思想（モデル名・プロンプトは`main.rs`に定数として明示し、`generate`は汎用的な実行器として保つ。data-collector側のmain.rsも同じスタイル）との一貫性を優先する
+- **並列実行**: 行わない。`tokio::join!`は使わず、本文生成→タグ生成の順に逐次`.await`する。理由: 1日1回のバッチ処理であり数秒のレイテンシ差は運用上問題にならない。並列化のコード複雑化コストに見合わない（タスクが要求する以上の抽象化をしない方針）
+
+```rust
+// main.rsでの呼び出しイメージ
+let body = generator.generate(&memo, GPT_MODEL, BODY_SYS_PRPT).await.expect("本文生成に失敗しました");
+let tags = generator.generate(&memo, GPT_MODEL, TAG_SYS_PRPT).await.expect("タグ生成に失敗しました");
+let post = prepare_post(body, tags);
+```
+
+### 実装内容（完了）
+
+- `ports::ai_generator::AiGenerator::generate`の引数順を`(memo, system, model)`→`(memo, model, system)`に修正し、`adapters::openai::OpenAiClient`の実装側と一致させた。実装前は両者が食い違ったままコンパイルが通ってしまっており（Rustはtraitの引数名を型チェックしないため）、`main.rs`が偶然実装側の順序で呼んでいたために事故なく動いていた危険な状態だった
+- `domain::post::prepare_post`を`(content: String) -> String`（素通し）から`(body: String, tags: String) -> String`（`format!("{}\n\n{}", body, tags)`で結合）に変更
+- `main.rs`の`SYS_PRPT`を`BODY_SYS_PRPT`/`TAG_SYS_PRPT`の2定数に分割し、`generate`を本文用・タグ用で2回逐次`.await`呼び出しする構成に変更
+- `HANDOFF_PHASE3.5.md`は実装完了に伴い削除済み
+
+### 動作確認（完了）
+
+`cargo check`通過を確認後、`memo_mq`の未使用メモ1件を使って実際に`cargo run`を実行。OpenAI APIが本文生成・タグ生成で2回呼ばれ、本文（140字以内）とタグ（`#エンジニア #運用`のような「#」始まりスペース区切り形式）が別々に生成され、`prepare_post`で結合された投稿がXへの実投稿まで成功することを確認した。`mark_used_memo`まで完走し「完了！」ログを確認済み。
+
+### タグの構造化（Vec化）（実装完了）
+
+**背景**: タグ分析（「どんなタグがいいのか」の集計）に使いたいというニーズを受け、タグを1本の文字列ではなく構造化データ（配列）として扱う方向に変更。DBスキーマ変更（`post_tags`正規化テーブル等）は将来課題としてスコープ外、今回はAI出力〜投稿直前までのデータ構造をVec化するのみ。
+
+**実装内容**:
+- `TAG_SYS_PRPT`を「#なし・カンマ区切りで出力する」指示に変更（例: `#Rust #個人開発` → `Rust,個人開発`）
+- `domain::post::parse_tags(raw: &str) -> Vec<String>`を新設。`split(',')` → 各要素`trim` → 先頭`#`を`trim_start_matches('#')`で防御的に除去（fine-tunedモデルが旧仕様の`#`付きの癖を引きずるケースへの対策）→ 空要素除去、の順で処理
+- `domain::post::prepare_post`のシグネチャを`(body: String, tags: String) -> String`から`(body: String, tags: Vec<String>) -> String`に変更。`#`の付与（`format!("#{}", tag)`）と結合を`prepare_post`側の責務に集約
+- `main.rs`: `generate`でタグの生文字列を取得後、`parse_tags`でパースしてから`prepare_post`に渡すフローに変更
+- `post.rs`の既存テスト2件を`Vec<String>`版に更新し、`parse_tags`の単体テスト4件（通常ケース・連続カンマ・末尾カンマ・`#`混入）を追加（`cargo test`で計6件パス確認済み）
+- `HANDOFF_TAG_ANALYSIS.md`は実装完了に伴い削除済み
+
+**動作確認（完了）**: `cargo check`・`cargo test`通過後、`memo_mq`の未使用メモ1件で実際に`cargo run`を実行。タグAIの出力が正しくパースされ`#転職 #年齢`のような二重`#`なしの形式でXへ実投稿されることを確認。本文+タグの合計文字数も140字を大きく下回っており、今回の変更による文字数超過の顕在化は無し。
+
+**スコープ外・将来課題として明示**:
+- DBスキーマ変更全般（`post_tags`正規化テーブル、`memo_mq`への配列カラム追加など）
+- タグの表記ゆれ正規化（`Rust`/`rust`/`RUST`等の統一）
+
+### 残課題
+
+- **本文+タグ結合後の140字超過チェックが存在しない**: `BODY_SYS_PRPT`は本文単体で140字以内を指示しているが、`prepare_post`で結合した最終テキスト全体の文字数チェックは無い。タグVec化により「AIが#込みで文字数調整する」前提が崩れた分、理論上は超過しやすくなる方向に働く懸念があるが、実装後の確認では顕在化していない
+- **タグが0件の場合、投稿末尾に不自然な空行が残る**: `parse_tags`が空`Vec`を返すと`prepare_post`は本文の後に空行だけが付いた投稿を組み立てる。エラー化や空行除去は未対応
+- 画像生成機能の設計は次フェーズで改めて検討
+
 ## data-collector
 
 **現フェーズ: 開発速度優先。方針が明確な変更はClaudeが直接実装する。**
@@ -362,3 +453,35 @@ Rust側（data-collector）に新規追加する環境変数:
 - Railway側cronスケジュール設定は別途（スコープ外）
 - data-collector側の`.env`に`AGENT_SDK_URL` / `AGENT_SDK_API_KEY`をローカル用に追記していない（Railwayデプロイ後、ローカル開発時は本番URLかローカル起動したagent-wrapperのURLを設定する）
 - `main.rs`の`total`件数カウントにAgent分の1件を加算する形にした（YouTube/Qiitaの件数ログと揃える判断）。指令書に明記がなかった箇所のため、意図と異なる場合は要調整
+
+## QA_PRJ（実装完了）
+
+**Phase番号を振らない独立した取り組み**。YouTube/Qiita/Agentのような新しいデータソース追加とは性質が異なり、Phase1〜3.5で実装したコード全体を横断するテスト基盤の整備。
+
+**背景**: Phase1〜3.5が完了した時点でテストコードは0件だった（両プロジェクトとも`dev-dependencies`未設定、HTTPモックcrateも未導入）。実際に「テストがあれば検出できたはずのバグ」が2件発生していた。
+
+1. data-collector側: YouTube APIレスポンスの並べ替えロジックの不具合（[adapters/youtube.rs](data-collector/src/adapters/youtube.rs)、修正済み）
+2. twitter-VCharacter側: `ports::ai_generator::AiGenerator::generate`のtrait定義と`adapters::openai::OpenAiClient::generate`の実装の引数順不一致（Phase3.5実装時に修正済み）。Rustはtraitの引数名を型チェックしないためコンパイルは通ってしまい、`main.rs`が偶然実装側の順序で呼んでいたために事故なく動いていた
+
+### スコープ（確定）
+
+- **対象プロジェクト**: `data-collector`と`twitter-VCharacter`の両方
+- **DB依存コード（`adapters/postgres.rs`）**: テスト対象外。`sqlx::query!`はコンパイル時に実DB接続を要求するため、目視レビュー・実運用での確認に委ねる
+- **HTTPモックライブラリ**: **wiremock**を採用（`async`/`tokio`ネイティブな構成との相性を優先）
+
+### 実装内容（完了）
+
+- 両プロジェクトの`Cargo.toml`に`[dev-dependencies]`（`wiremock = "0.6"`, `tokio`の`test-util`feature）を追加
+- `data-collector/src/adapters/youtube.rs`: `base_url`をテスト用に注入できるよう`YoutubeClient`を拡張（`#[cfg(test)] fn with_base_url`）。並べ替えロジック（`.rev().take(5)`で直近5件を新しい順に取る）のテストを追加
+- `data-collector/src/adapters/qiita.rs`: 同様に`QiitaClient`へ`base_url`注入を追加。`chars().take(300)`のUTF-8文字境界処理のテスト（マルチバイト文字での非パニック確認、300字未満のケース）を追加
+- `twitter-VCharacter/src/domain/post.rs`: `prepare_post`のテスト2件（タグVec化に伴い更新）、`parse_tags`のテスト4件（通常ケース・連続カンマ・末尾カンマ・`#`混入）を追加
+- `cargo test`実行結果: data-collector 3 passed、twitter-VCharacter 6 passed、いずれも0 failed。DB接続・実API呼び出しなしで完結することを確認済み
+- `HANDOFF_QA_PRJ.md`は実装完了に伴い削除済み
+
+### スコープ外（今回やらないこと、次回以降の候補）
+
+- `main.rs`内の`success_count`/`failure_count`合算ロジックのテスト（`main.rs`からロジックを切り出すリファクタリングが前提になるため見送り）
+- `AiGenerator`の引数順を型レベルで守る仕組み（構造体でラップする等）の検討
+- DB依存コードのテスト（Docker等でテスト用DBを用意する方式）
+- CI（GitHub Actions等）へのテスト組み込み。現状CI自体が存在しないため、ローカルでの`cargo test`実行のみ
+- `youtube.rs`/`qiita.rs`以外のadapter（`openai.rs`, `agent.rs`, `twitter.rs`, `postgres.rs`）のテスト追加
