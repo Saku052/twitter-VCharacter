@@ -15,7 +15,7 @@ impl AgentClient {
 
 #[async_trait]
 impl AgentPort for AgentClient {
-    async fn investigate(&self) -> Result<String> {
+    async fn investigate(&self) -> Result<Vec<String>> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(1200))
             .build()?;
@@ -28,11 +28,11 @@ impl AgentPort for AgentClient {
             .error_for_status()?;
 
         let body: InvestigateResponse = response.json().await?;
-        Ok(body.memo)
+        Ok(body.memos)
     }
 }
 
 #[derive(serde::Deserialize)]
 struct InvestigateResponse {
-    memo: String,
+    memos: Vec<String>,
 }

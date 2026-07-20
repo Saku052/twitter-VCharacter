@@ -12,8 +12,8 @@ const SYSTEM: &str = "<role>さく担当の編集者。ネタ元を読んで、�
 <rules>
 - ハッシュタグや絵文字は付けない
 - 事実をそのまま要約するのではなく『これ面白いな』『これ自分でも試したい』のような感想・気づきの形に変換する
-- 専門用語は無理に避けず、ただし社会人1年目が背伸びしすぎない温度感で
-- コードや型名など込み入った専門用語は、メモの時点で噛み砕く（ツイート生成側では元情報を参照できないため）
+- ゲーム開発・エンジニアリングどちらの専門用語も無理に避けず、ただし社会人1年目が背伸びしすぎない温度感で
+- コードや型名、ゲームエンジン特有の用語など込み入った専門用語は、メモの時点で噛み砕く（ツイート生成側では元情報を参照できないため）
 - 50文字以内
 </rules>";
 
@@ -120,26 +120,29 @@ async fn main() {
     }
 
     // Agent SDK処理
-    match app.4.investigate().await {
-        Ok(memo) => {
-            match app.2.insert_agent_memo(&memo).await {
-                Ok(()) => {
-                    println!("Agent由来メモを保存しました");
-                    success_count += 1;
-                }
-                Err(e) => {
-                    eprintln!("Agent由来メモのmemo_mqへの書き込みに失敗: {:?}", e);
-                    failure_count += 1;
+    let agent_total = match app.4.investigate().await {
+        Ok(memos) => {
+            let agent_total = memos.len();
+            for memo in memos {
+                match app.2.insert_agent_memo(&memo).await {
+                    Ok(()) => {
+                        println!("Agent由来メモを保存しました");
+                        success_count += 1;
+                    }
+                    Err(e) => {
+                        eprintln!("Agent由来メモのmemo_mqへの書き込みに失敗: {:?}", e);
+                        failure_count += 1;
+                    }
                 }
             }
+            agent_total
         }
         Err(e) => {
             eprintln!("Agent調査に失敗: {:?}", e);
             failure_count += 1;
+            1 // 調査自体の失敗も1件の試行として数える
         }
-    }
-
-    let agent_total = 1; // Agent調査は1バッチ=1件の試行として数える
+    };
     let total = youtube_total + qiita_total + agent_total;
     println!("バッチ終了: {}件中{}件成功", total, success_count);
 

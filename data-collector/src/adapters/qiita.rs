@@ -28,15 +28,15 @@ impl QiitaPort for QiitaClient {
     async fn fetch_trending_articles(&self) -> Result<Vec<QiitaArticle>> {
         let client = reqwest::Client::new();
 
-        let five_days_ago = (Utc::now() - Duration::days(5)).format("%Y-%m-%d").to_string();
-        let query = format!("stocks:>20 stocks:<50 created:>{}", five_days_ago);
+        let thirty_days_ago = (Utc::now() - Duration::days(30)).format("%Y-%m-%d").to_string();
+        let query = format!("tag:ゲーム開発 stocks:>1 created:>{}", thirty_days_ago);
 
         let response = client
             .get(format!("{}/items", self.base_url))
             .query(&[
                 ("query", query.as_str()),
                 ("page", "1"),
-                ("per_page", "100"),
+                ("per_page", "3"),
             ])
             .send()
             .await?

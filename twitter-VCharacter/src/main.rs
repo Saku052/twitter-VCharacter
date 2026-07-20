@@ -4,15 +4,19 @@ mod adapters;
 mod config;
 
 use config::build_app;
-use domain::post::{parse_image_post_probability, parse_tags, prepare_post, should_attach_image};
+use domain::post::{parse_tags, prepare_post};
+// 画像生成は一旦廃止（Phase5でペルソナ転換に伴い停止。復活の可能性があるためコメントアウトで残置）
+// use domain::post::{parse_image_post_probability, should_attach_image};
 use ports::ai_generator::AiGenerator;
-use ports::image_generator::ImageGenerator;
-use ports::media_uploader::MediaUploader;
+// use ports::image_generator::ImageGenerator;
+// use ports::media_uploader::MediaUploader;
 use ports::memo_queue::MemoQueue;
 use ports::text_publisher::TextPublisher;
 
-const GPT_MODEL: &str = "ft:gpt-4.1-2025-04-14:personal:tweetsource1:DfS5fKl8";
-const BODY_SYS_PRPT: &str = "<role>技術が好きな社会人1年目のエンジニア</role>
+// 旧モデル（fine-tuned、技術者ペルソナで学習済み）。切り戻し用に保持: ft:gpt-4.1-2025-04-14:personal:tweetsource1:DfS5fKl8
+// Phase5でfine-tuning運用をやめ、素のgpt-5.5 + プロンプトのみでペルソナを表現する方式に切り替え
+const GPT_MODEL: &str = "gpt-5.5";
+const BODY_SYS_PRPT: &str = "<role>個人でゲームを作っているVtuber。普段は社会人1年目のエンジニアとして働いていて、その経験を活かして自分のゲームを作っている</role>
 <task>渡されたメモを元に、本人視点のツイート本文を生成する</task>
 <rules>
 - 140字以内
@@ -22,7 +26,7 @@ const BODY_SYS_PRPT: &str = "<role>技術が好きな社会人1年目のエン�
 - 自慢や説教にならず、気づきや失敗を等身大で書く
 </rules>";
 
-const TAG_SYS_PRPT: &str = "<role>技術が好きな社会人1年目のエンジニア</role>
+const TAG_SYS_PRPT: &str = "<role>個人でゲームを作っているVtuber。普段は社会人1年目のエンジニアとして働いていて、その経験を活かして自分のゲームを作っている</role>
 <task>渡されたメモを元に、ツイートに付けるハッシュタグを考える</task>
 <rules>
 - 内容に関連するタグを1〜2個
@@ -30,11 +34,12 @@ const TAG_SYS_PRPT: &str = "<role>技術が好きな社会人1年目のエンジ
 - 説明文や前置きは付けず、タグの文字列のみを出力する
 </rules>";
 
-const IMAGE_PROMPT_TEMPLATE: &str = "以下のメモの雰囲気を表す、シンプルで温かみのあるイラスト画像を1枚生成してください。
-文字は入れないでください。技術系VTuberのツイート添付を想定した、
-柔らかい色合いのフラットイラスト風。
-
-メモ: {memo}";
+// 画像生成機能は一旦廃止（Phase5でペルソナ転換に伴い停止）。IMAGE_PROMPT_TEMPLATEも含め復活の可能性があるため関連コードは残置。
+// const IMAGE_PROMPT_TEMPLATE: &str = "以下のメモの雰囲気を表す、シンプルで温かみのあるイラスト画像を1枚生成してください。
+// 文字は入れないでください。ゲーム開発系Vtuberのツイート添付を想定した、
+// 柔らかい色合いのフラットイラスト風。
+//
+// メモ: {memo}";
 
 #[tokio::main]
 async fn main() {
@@ -57,27 +62,28 @@ async fn main() {
     // 文章を準備
     let post = prepare_post(body, tags);
 
-    // 画像生成（確率判定。失敗時は画像なしで投稿続行）
-    let probability = parse_image_post_probability(std::env::var("IMAGE_POST_PROBABILITY").ok());
-
-    let media_ids = if should_attach_image(rand::random::<f64>(), probability) {
-        let image_prompt = IMAGE_PROMPT_TEMPLATE.replace("{memo}", &memo_text);
-        match generator.generate_image(&image_prompt).await {
-            Ok(image_bytes) => match publisher.upload_media(&image_bytes).await {
-                Ok(media_id) => Some(vec![media_id]),
-                Err(e) => {
-                    eprintln!("画像アップロード失敗、テキストのみで続行: {}", e);
-                    None
-                }
-            },
-            Err(e) => {
-                eprintln!("画像生成失敗、テキストのみで続行: {}", e);
-                None
-            }
-        }
-    } else {
-        None
-    };
+    // 画像生成は一旦廃止（Phase5でペルソナ転換に伴い停止。復活の可能性があるためコメントアウトで残置）
+    // let probability = parse_image_post_probability(std::env::var("IMAGE_POST_PROBABILITY").ok());
+    //
+    // let media_ids = if should_attach_image(rand::random::<f64>(), probability) {
+    //     let image_prompt = IMAGE_PROMPT_TEMPLATE.replace("{memo}", &memo_text);
+    //     match generator.generate_image(&image_prompt).await {
+    //         Ok(image_bytes) => match publisher.upload_media(&image_bytes).await {
+    //             Ok(media_id) => Some(vec![media_id]),
+    //             Err(e) => {
+    //                 eprintln!("画像アップロード失敗、テキストのみで続行: {}", e);
+    //                 None
+    //             }
+    //         },
+    //         Err(e) => {
+    //             eprintln!("画像生成失敗、テキストのみで続行: {}", e);
+    //             None
+    //         }
+    //     }
+    // } else {
+    //     None
+    // };
+    let media_ids = None;
 
     // 投稿
     match publisher.post_text(&post, media_ids).await {

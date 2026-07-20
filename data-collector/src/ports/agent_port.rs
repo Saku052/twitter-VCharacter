@@ -3,5 +3,5 @@ use anyhow::Result;
 
 #[async_trait]
 pub trait AgentPort {
-    async fn investigate(&self) -> Result<String>;
+    async fn investigate(&self) -> Result<Vec<String>>;
 }

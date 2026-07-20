@@ -562,3 +562,58 @@ Rust側（data-collector）に新規追加する環境変数:
 - DB依存コードのテスト（Docker等でテスト用DBを用意する方式）
 - CI（GitHub Actions等）へのテスト組み込み。現状CI自体が存在しないため、ローカルでの`cargo test`実行のみ
 - `youtube.rs`/`qiita.rs`以外のadapter（`openai.rs`, `agent.rs`, `twitter.rs`, `postgres.rs`）のテスト追加
+
+## Phase5（完了）
+
+`HANDOFF_PHASE5.md`の指令書通り、「さく」のペルソナ自体を転換するタスク。「技術が好きな社会人1年目のエンジニア」から「ゲーム制作をしている個人Vtuber（社会人1年目エンジニアという背景は残す）」へ主従を入れ替えた。詳細な経緯・方針は`SNS_POSITIONING_PROPOSAL.md`参照（`HANDOFF_PHASE5.md`は完了に伴い削除済み）。
+
+### 決定事項（確定）
+
+- **fine-tuningは実施しない**: 当初の指令書は「プロンプト修正→検証→fine-tuning要否判断」という段階的アプローチだったが、以下の理由で方針変更した
+  1. OpenAIのfine-tuning platformが2026年5月7日付で段階的縮小中と判明（7月2日以降、過去60日推論実績のない組織は新規job作成不可。2027年1月6日に既存ユーザーも完全停止）
+  2. 現行の`GPT_MODEL`（`gpt-4.1`ベース）は2026年10月23日にシャットダウン予定と判明。fine-tuningするなら世代交代が必要だが、実際にOpenAIダッシュボードでbase model選択肢を確認したところ**GPT-5系はfine-tuning対象に入っていなかった**
+  3. 上記を踏まえ、fine-tuning自体をやめ、素の`gpt-5.5` + プロンプトのみでペルソナを表現する方式に切り替えた
+- **旧モデルID**（切り戻し用）: `ft:gpt-4.1-2025-04-14:personal:tweetsource1:DfS5fKl8`。[twitter-VCharacter/src/main.rs](twitter-VCharacter/src/main.rs)にコメントで保持
+- **画像生成機能は一旦廃止**: `IMAGE_PROMPT_TEMPLATE`は「技術系VTuber」を想定した文面だったため転換対象だったが、ユーザー判断で機能自体を停止することになった。`main.rs`内の呼び出し・定数・関連importをコメントアウトで無効化（削除はしない。復活の可能性があるため）。`ImageGenerator`/`MediaUploader`のport・adapter実装はコードとして残置（dead_code警告は許容）
+- **Agent SDKの`TASK_PROMPT`変更もスコープに含めた**: 指令書では別タスク扱い（§6）だったが、統合テストで「ゲーム開発Vtuberらしいメモ」が`memo_mq`に入っている状態を作る必要があったため、この場で前倒しして実施
+- **Agent SDKの1回あたりメモ生成件数を1→2に変更**: ユーザー要望。`agent-wrapper`の`/investigate`レスポンス契約を`{"memo": str}`から`{"memos": [str]}`に破壊的変更し、`data-collector`側の`AgentPort::investigate()`・`AgentClient`・`main.rs`を連動して更新
+- **Qiitaの`tag:ゲーム開発`絞り込みもこの場で実施**: 指令書§6では別タスク扱いだったが、ペルソナ転換の一連の作業として合わせて実装。クエリを`stocks:>20 stocks:<50 created:>5日前`から`tag:ゲーム開発 stocks:>1 created:>30日前`に変更（HANDOFF記載の実測値: `stocks:>1`・直近30日で28件を採用）
+- **Qiita取得件数の上限を3件に制限**: 初回実行時、`tag:ゲーム開発`が過去に一度も重複排除されていなかったため`per_page=100`のままヒットした約28件がほぼ全件`memo_mq`に一括投入される事態が発生。1回のバッチで大量にメモが積み上がるのを避けるため、`per_page`を`3`に変更（1回の実行あたり最大3件まで取得）
+- **YouTubeプレイリストの中身は未着手**: プロダクトオーナー自身が編集する想定（指令書§6通り、コード変更不要）
+
+### 実装内容
+
+- **`twitter-VCharacter/src/main.rs`**
+  - `BODY_SYS_PRPT`/`TAG_SYS_PRPT`の`<role>`を「個人でゲームを作っているVtuber。普段は社会人1年目のエンジニアとして働いていて、その経験を活かして自分のゲームを作っている」に変更（`<rules>`は現状維持）
+  - `GPT_MODEL`を`gpt-5.5`に変更（旧fine-tunedモデルIDはコメントで保持）
+  - 画像生成（`IMAGE_PROMPT_TEMPLATE`定義、`main()`内の生成・アップロード呼び出し、関連import）をコメントアウト。`media_ids`は`None`固定
+- **`data-collector/src/main.rs`**
+  - `SYSTEM`の`<rules>`内、技術記事前提だった2行を「ゲーム開発・エンジニアリングどちらの専門用語も無理に避けず」に調整
+  - Agent SDK処理部分を、複数メモ（`Vec<String>`）をループして`insert_agent_memo`する形に変更
+- **`data-collector/src/adapters/qiita.rs`**: クエリを`tag:ゲーム開発 stocks:>1 created:>30日前`に変更。`per_page`を`100`→`3`に変更（1回の実行あたり最大3件までに制限）
+- **`data-collector/src/ports/agent_port.rs`**: `investigate()`の戻り値を`Result<String>`→`Result<Vec<String>>`に変更
+- **`data-collector/src/adapters/agent.rs`**: `InvestigateResponse`のフィールドを`memo: String`→`memos: Vec<String>`に変更（Python側の新レスポンス契約と一致）
+- **`agent-wrapper/main.py`**
+  - `TASK_PROMPT`: 「今日の技術トレンドを1つ」→「今日のゲーム開発関連の話題を2つ」。検索例・終了条件・出力フォーマット（改行区切り2行）も合わせて変更
+  - `run_investigation()`: 戻り値を`str`→`list[str]`に変更（最後の発言を改行分割）
+  - `/investigate`: レスポンスを`{"memo": ...}`→`{"memos": [...]}`に変更
+- **`agent-wrapper/CLAUDE.md`**: `main.rs`側とは独立して存在していた「技術が好きな社会人1年目のエンジニア」というペルソナ記述を発見し、同じ表現に統一。`<rules>`もゲーム開発用語対応に調整
+
+### 動作確認結果
+
+- `twitter-VCharacter`・`data-collector`ともに`cargo check`成功（画像生成関連の`dead_code`警告のみ、想定通り）
+- `agent-wrapper/main.py`のPython構文チェック成功
+- **`agent-wrapper`のローカル起動確認を実施**（`uvicorn`で`127.0.0.1:8787`起動、`AGENT_SDK_API_KEY`はローカル一時値）。`POST /investigate`を実際にWeb検索込みで実行し、200 OKで`{"memos": ["ゲームで稼げなくても続ける道があるって話、心が軽くなった", "1週間で1本完成させる縛り、やることを絞る発想が新鮮だった"]}`を確認。2件・ゲーム開発文脈・50字以内のルールをいずれも満たしていた
+- **`twitter-VCharacter`の`cargo run`を1回だけ実行**（ユーザー判断で「1件だけなら実投稿してよい」として許可）。結果、**旧ペルソナ（技術者ネタ）のメモがそのまま投稿された**（「技術面接の対策、AIに想定質問出してもらうだけじゃなくて〜」＋`#技術面接 #AI活用`）。原因は`fetch_latest_memo`が`used_at IS NULL`の最古1件を機械的に取得するため、転換前に溜まっていた旧メモが先に読まれたこと。プロンプト変更自体の不具合ではなく、素材となるメモが旧ペルソナのものだったために起きた想定内の結果
+- **`data-collector`を実行してゲーム開発ネタを`memo_mq`に投入**（ローカル`agent-wrapper`をAGENT_SDK_URLに指定）。Qiitaの`tag:ゲーム開発`クエリが実際に機能し、脱出ゲーム制作・Axmol Engine・インベントリシステムなど大量のゲーム開発文脈メモを生成（36件中30件成功、1件はOpenAI API呼び出しの一時的なTLS接続エラー、5件はYouTube側で既に処理済みのためスキップ）。Agent SDKも正常に2件生成・保存を複数回確認。この初回実行で一括生成が起きた反省を踏まえ、Qiitaの`per_page`を3に制限（上記「決定事項」参照）
+- **`memo_mq`のクリーンアップはユーザー側で対応済み**: 転換前（技術者ペルソナ時代）に溜まっていた未使用の古いメモは、ユーザーが別途対応した
+
+### クロージング
+
+- `HANDOFF_PHASE5.md`は完了に伴い削除済み
+- **今後の残課題**（Phase5の範囲外、次回以降）
+  - 新ペルソナでの実投稿による最終確認（`memo_mq`クリーンアップ後の`cargo run`）はまだ実施していない
+  - `SNS_POSITIONING_PROPOSAL.md`の更新（Phase A該当部分が完了した旨の追記）はまだ行っていない
+  - SNS担当者から提案のあったエンゲージメント施策（末尾に問いかけ・二択を添えてリプライを誘発する`<rules>`追加）は、ペルソナ転換とは別軸の改善として保留。段階的に分離する方針で合意済み
+  - Railwayへのデプロイ・環境変数反映はまだ行っていない
+  - data-collector側の`.env`に`AGENT_SDK_URL` / `AGENT_SDK_API_KEY`のローカル用設定がまだ無い。今回はコマンドラインで一時的に環境変数を渡して実行した
