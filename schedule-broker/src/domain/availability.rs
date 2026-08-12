@@ -527,3 +527,69 @@ ranges = [
         }
     }
 }
+
+#[cfg(test)]
+mod constraint_tests {
+    use super::*;
+    use crate::domain::pattern::LifePattern;
+
+    /// 本番と同じ設定で、ユーザーが明言した制約を守れることを確認する:
+    ///   「22時以降は何も入れたくない」「7時半まで寝ている」
+    fn engine() -> AvailabilityEngine {
+        let src = std::fs::read_to_string("availability.toml").unwrap();
+        AvailabilityEngine::new(LifePattern::from_toml_str(&src).unwrap())
+    }
+
+    fn jst(y: i32, m: u32, d: u32, h: u32, min: u32, dur: i64) -> TimeSlot {
+        let local = chrono_tz::Asia::Tokyo.with_ymd_and_hms(y, m, d, h, min, 0).unwrap();
+        TimeSlot::from_duration(local.with_timezone(&Utc), dur).unwrap()
+    }
+
+    #[test]
+    fn nothing_starts_at_or_after_22() {
+        let e = engine();
+        // 2026-09-03 は木曜
+        for (h, m) in [(22, 0), (22, 30), (23, 0), (23, 30)] {
+            let got = e.check(jst(2026, 9, 3, h, m, 30), &[], &[]);
+            assert!(!got.is_free(), "{}:{:02} が空きになっている: {:?}", h, m, got);
+        }
+    }
+
+    #[test]
+    fn slot_must_finish_by_22() {
+        let e = engine();
+        // 21:30開始の60分は22:30に終わる -> 不可
+        assert!(!e.check(jst(2026, 9, 3, 21, 30, 60), &[], &[]).is_free());
+        // 21:00開始の60分は22:00ちょうどに終わる -> 可
+        assert!(e.check(jst(2026, 9, 3, 21, 0, 60), &[], &[]).is_free());
+    }
+
+    #[test]
+    fn sleeping_until_730() {
+        let e = engine();
+        for (h, m) in [(0, 0), (3, 0), (6, 0), (7, 0)] {
+            let got = e.check(jst(2026, 9, 5, h, m, 30), &[], &[]);
+            assert!(!got.is_free(), "{}:{:02} が空きになっている", h, m);
+        }
+        // 土曜の朝も同様に寝ている
+        assert!(!e.check(jst(2026, 9, 5, 7, 0, 30), &[], &[]).is_free());
+    }
+
+    #[test]
+    fn weekend_search_never_crosses_22() {
+        let e = engine();
+        // 土曜1日分を探索
+        let range = jst(2026, 9, 5, 0, 0, 24 * 60);
+        let slots = e.search(range, 60, None, None, &[], &[], 20);
+        assert!(!slots.is_empty());
+        for s in &slots {
+            let start = s.start.with_timezone(&chrono_tz::Asia::Tokyo);
+            let end = s.end.with_timezone(&chrono_tz::Asia::Tokyo);
+            assert!(start.hour() >= 10, "10時前の候補: {}", start);
+            assert!(
+                end.hour() < 22 || (end.hour() == 22 && end.minute() == 0),
+                "22時を超える候補: {}", end
+            );
+        }
+    }
+}
