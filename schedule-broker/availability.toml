@@ -1,0 +1,32 @@
+# 生活パターン設定
+#
+# 2026-06〜08 の実カレンダー（27件）から導出。
+#   勤務  : 14件中10件が 9:00-17:30、3件が 8:00-16:30
+#   夜    : 18:00 / 18:30 開始の実績あり（3ヶ月で4件）
+#   居住地: 溝の口 / 勤務地: 二子玉川（大井町線で数分）→ 移動バッファは15分で足りる
+#
+# days に使える値: mon/tue/wed/thu/fri/sat/sun, weekday, weekend, all
+# 時刻は "HH:MM"。終了 <= 開始 の場合は日跨ぎとして扱う（例: ["23:00", "02:00"]）
+
+[defaults]
+timezone = "Asia/Tokyo"
+buffer_before_minutes = 15        # 溝の口〜二子玉川の移動を考慮。近距離なので15分で十分
+buffer_after_minutes = 15
+min_slot_minutes = 30             # これ未満の隙間は空きとみなさない
+search_granularity_minutes = 30   # 候補を刻む単位
+
+# 受付可能な時間帯（ここに完全に収まらないスロットは不可）
+[[windows]]
+days = ["weekday"]
+ranges = [["18:00", "23:00"]]     # 勤務17:30終了＋移動15分 → 18:00から受けられる
+
+[[windows]]
+days = ["sat", "sun"]
+ranges = [["10:00", "23:00"]]
+
+# 恒常的に埋まっている帯（予定表が空でもここは不可）
+[blackouts]
+ranges = [
+  { days = ["weekday"], range = ["09:00", "17:30"], label = "勤務" },
+  { days = ["all"], range = ["00:00", "07:00"], label = "睡眠" },
+]
