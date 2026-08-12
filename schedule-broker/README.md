@@ -3,7 +3,7 @@
 他のAIエージェントから呼ばれる、空き時間判定API。
 「08/26 11:30 空いてる？」「直近1週間で22時前に空いてる時間ある？」に答える。
 
-**現在 Phase A（読み取りのみ）**。予定の登録（TickTick連携）は Phase B で実装する。
+**Phase A（空き判定）/ Phase B（予定登録）とも実装済み。**
 
 設計の背景は [../scratch/SECRETARY_REQUIREMENTS.md](../scratch/SECRETARY_REQUIREMENTS.md) 参照。
 
@@ -132,6 +132,8 @@ curl -X POST http://localhost:8080/v1/availability/search \
 | 4 | カレンダーに予定がある（前後バッファ込み） | `busy_calendar` |
 | 5 | 登録済み・カレンダー未反映の予約と重なる | `busy_pending` |
 
+`busy_pending` は TickTick→Google の同期が完了する前の予約を指す。
+
 1〜3は生活パターンだけで決まるため、**カレンダーを引かずに応答する**。
 上流が落ちていても「勤務中です」は返せる。
 
@@ -147,16 +149,73 @@ src/
 │   ├── pattern.rs             # availability.toml のパースと検証
 │   └── availability.rs        # 空き判定エンジン（外部依存なし）
 ├── ports/
-│   └── calendar_reader.rs     # trait CalendarReader
+│   ├── calendar_reader.rs     # trait CalendarReader
+│   ├── task_writer.rs         # trait TaskWriter
+│   └── reservation_store.rs   # trait ReservationStore
 └── adapters/
-    └── google_calendar.rs     # FreeBusy API
+    ├── google_calendar.rs     # FreeBusy API
+    ├── ticktick.rs            # Open API
+    └── postgres.rs            # reservations テーブル
 ```
 
 判定ロジックを外部APIから切り離してあるため、カレンダーの供給元を差し替えても
 `domain/availability.rs` には手を入れずに済む。
 
-## Phase B（未実装）
+## TickTick 連携（Phase B）
 
-- TickTick OAuth と `POST /v1/reservations`
-- 予約の永続化（`reservations` テーブル）— FreeBusyの同期遅延を埋めるため
-- `verify_availability` による二重予約防止
+### セットアップ
+
+1. [TickTick開発者センター](https://developer.ticktick.com/manage) で New App
+2. **OAuth redirect URL** に `http://localhost:8766` を登録（これが無いと認可が通らない）
+3. Client ID / Secret を `.env` に設定
+4. トークン取得:
+
+```bash
+python3 scripts/get_ticktick_token.py
+```
+
+`DATABASE_URL` と `TICKTICK_ACCESS_TOKEN` の両方が揃ったときだけ書き込みが有効になる。
+片方だけだと「TickTickに入ったのに記録が無い」不整合が起きるため。
+無効時、予約系は 503 を返すが**空き判定は通常どおり動く**。
+
+### `POST /v1/reservations`
+
+```bash
+curl -X POST http://localhost:8080/v1/reservations \
+  -H 'content-type: application/json' -H 'x-api-key: YOUR_KEY' \
+  -d '{
+    "title": "打ち合わせ",
+    "start": "2026-08-26T20:00:00+09:00",
+    "duration_minutes": 60,
+    "content": "議題: ...",
+    "created_by": "agent-name"
+  }'
+```
+
+`verify_availability`（既定 true）が有効なら、登録前に空きを再確認し、
+埋まっていれば 409 と代替候補を返す。
+
+### 登録先は受信トレイ（Inbox）
+
+`project_id` / `TICKTICK_PROJECT_ID` を指定しなければ受信トレイに入る。
+
+TickTick の受信トレイは `GET /open/v1/project` の一覧に現れず ID を引く手段が無い
+（実際のIDは `inbox` + 数字）。そのため **projectId を送らないこと** が Inbox 指定の方法になる。
+取り消しには projectId が要るので、作成レスポンスが返した値を保存している。
+
+### `DELETE /v1/reservations/{id}`
+
+### 既知のTickTick API不具合（2026-08 時点）
+
+**DELETE が 200 を返すのにタスクが消えない。** 実機で確認済み（繰り返しても消えない）。
+そのため取り消しは `complete`（完了扱い）を主経路とし、DELETE は併用に留めている。
+完了済みタスクはカレンダー上で時間を占有しないため、取り消しとしては十分に機能する。
+
+### 同期遅延への対策
+
+TickTick → Google Calendar の同期には遅延がありうるため、本APIが登録した予約は
+`reservations` テーブルにも記録し、空き判定時に FreeBusy とマージする。
+これにより「登録直後に同じ枠を空きと案内する」二重予約を防ぐ。
+
+実測では同期はほぼ即時で、2件目は `busy_calendar` として弾かれた。
+DBの記録は保険として機能している。

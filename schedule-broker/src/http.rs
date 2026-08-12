@@ -17,8 +17,22 @@ const MAX_LIMIT: usize = 50;
 
 pub struct AppState {
     pub calendar: Box<dyn CalendarReader + Send + Sync>,
+    /// 書き込み側。未設定なら予約系エンドポイントは 503 を返す
+    pub write: Option<crate::config::WriteSide>,
     pub engine: AvailabilityEngine,
     pub api_key: String,
+}
+
+impl AppState {
+    fn write_side(&self) -> Result<&crate::config::WriteSide, ApiError> {
+        self.write.as_ref().ok_or_else(|| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "write_disabled",
+                "書き込み機能が無効です（TICKTICK_ACCESS_TOKEN / DATABASE_URL を設定してください）",
+            )
+        })
+    }
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -26,6 +40,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/health", get(health))
         .route("/v1/availability/check", post(check))
         .route("/v1/availability/search", post(search))
+        .route("/v1/reservations", post(create_reservation))
+        .route("/v1/reservations/{id}", axum::routing::delete(delete_reservation))
         .with_state(state)
 }
 
@@ -103,8 +119,9 @@ async fn check(
         .fetch_busy(fetch_range)
         .await
         .map_err(ApiError::upstream)?;
+    let pending = pending_slots(&state, fetch_range).await;
 
-    let response = match state.engine.check(slot, &busy, &[]) {
+    let response = match state.engine.check(slot, &busy, &pending) {
         Availability::Free => CheckResponse {
             available: true,
             reason: None,
@@ -144,13 +161,29 @@ async fn alternatives_for(
     let fetch_range = TimeSlot::new(range.start - margin, range.end)
         .ok_or_else(|| anyhow::anyhow!("代替探索の取得範囲が不正です"))?;
     let busy = state.calendar.fetch_busy(fetch_range).await?;
+    let pending = pending_slots(state, fetch_range).await;
 
     Ok(state
         .engine
-        .search(range, duration_minutes, None, None, &busy, &[], 3)
+        .search(range, duration_minutes, None, None, &busy, &pending, 3)
         .into_iter()
         .map(|s| SlotView::new(s, state))
         .collect())
+}
+
+/// 未同期の予約を取得する。
+/// 書き込み無効時や取得失敗時は空を返す（読み取り機能を巻き込んで落とさない）
+async fn pending_slots(state: &Arc<AppState>, range: TimeSlot) -> Vec<TimeSlot> {
+    let Some(write) = state.write.as_ref() else {
+        return Vec::new();
+    };
+    match write.reservations.find_overlapping(range).await {
+        Ok(rs) => rs.into_iter().map(|r| r.slot).collect(),
+        Err(e) => {
+            tracing::warn!("未同期予約の取得に失敗しました: {:?}", e);
+            Vec::new()
+        }
+    }
 }
 
 fn reason_code(reason: crate::domain::slot::BusyReason) -> String {
@@ -229,10 +262,11 @@ async fn search(
         .fetch_busy(range)
         .await
         .map_err(ApiError::upstream)?;
+    let pending = pending_slots(&state, range).await;
 
     let slots = state
         .engine
-        .search(range, req.duration_minutes, earliest, latest, &busy, &[], limit)
+        .search(range, req.duration_minutes, earliest, latest, &busy, &pending, limit)
         .into_iter()
         .map(|s| SlotView::new(s, &state))
         .collect();
@@ -250,6 +284,164 @@ fn parse_optional_time(raw: Option<&str>, field: &str) -> Result<Option<NaiveTim
             .map(Some)
             .map_err(|_| ApiError::bad_request("invalid_time", format!("{} の形式が不正です（HH:MM）", field))),
     }
+}
+
+// ---------- reservations ----------
+
+#[derive(Deserialize)]
+pub struct CreateReservationRequest {
+    title: String,
+    start: DateTime<FixedOffset>,
+    duration_minutes: i64,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    project_id: Option<String>,
+    /// 登録前に空きを再確認する。既定で有効（二重予約を防ぐため）
+    #[serde(default = "default_true")]
+    verify_availability: bool,
+    /// 呼び出し元エージェントの識別子
+    #[serde(default)]
+    created_by: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Serialize)]
+pub struct CreateReservationResponse {
+    reservation_id: String,
+    ticktick_task_id: String,
+    start: String,
+    end: String,
+}
+
+async fn create_reservation(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<CreateReservationRequest>, axum::extract::rejection::JsonRejection>,
+) -> Result<(StatusCode, Json<CreateReservationResponse>), ApiError> {
+    authorize(&headers, &state.api_key)?;
+    let write = state.write_side()?;
+    let Json(req) = body.map_err(|e| ApiError::bad_request("invalid_body", e.body_text()))?;
+
+    if req.duration_minutes <= 0 {
+        return Err(ApiError::bad_request(
+            "invalid_duration",
+            "duration_minutes は正の値で指定してください",
+        ));
+    }
+    if req.title.trim().is_empty() {
+        return Err(ApiError::bad_request("invalid_title", "title は必須です"));
+    }
+
+    let slot = TimeSlot::from_duration(req.start.with_timezone(&Utc), req.duration_minutes)
+        .ok_or_else(|| ApiError::bad_request("invalid_range", "有効な時間区間になりません"))?;
+
+    if req.verify_availability {
+        // カレンダーと未同期予約の両方を見る。
+        // TickTick -> Google の同期には遅延があるため、DBを併せて見ないと
+        // 直前に自分で入れた予定を見落として二重予約になる
+        let margin = Duration::minutes(
+            state.engine.pattern().buffer_before_minutes
+                + state.engine.pattern().buffer_after_minutes,
+        ) + Duration::hours(1);
+        let fetch_range = TimeSlot::new(slot.start - margin, slot.end + margin)
+            .ok_or_else(|| ApiError::bad_request("invalid_range", "取得範囲が不正です"))?;
+
+        let busy = state
+            .calendar
+            .fetch_busy(fetch_range)
+            .await
+            .map_err(ApiError::upstream)?;
+        let pending: Vec<TimeSlot> = write
+            .reservations
+            .find_overlapping(fetch_range)
+            .await
+            .map_err(ApiError::internal)?
+            .into_iter()
+            .map(|r| r.slot)
+            .collect();
+
+        if let Availability::Busy { reason, detail } = state.engine.check(slot, &busy, &pending) {
+            let alternatives = alternatives_for(&state, slot, req.duration_minutes)
+                .await
+                .unwrap_or_default();
+            return Err(ApiError::conflict(reason_code(reason), detail, alternatives));
+        }
+    }
+
+    let created = write
+        .tasks
+        .create_task(crate::ports::task_writer::NewTask {
+            title: req.title.clone(),
+            content: req.content.clone(),
+            slot,
+            project_id: req.project_id.clone(),
+        })
+        .await
+        .map_err(ApiError::upstream)?;
+
+    // TickTickへの登録が成功した後にDBへ記録する。
+    // ここで失敗するとTickTickにだけ残るため、taskIdをログに残して追跡可能にする
+    let reservation_id = write
+        .reservations
+        .insert(crate::ports::reservation_store::NewReservation {
+            task_id: created.task_id.clone(),
+            project_id: created.project_id.clone(),
+            title: req.title,
+            slot,
+            created_by: req.created_by,
+        })
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                ticktick_task_id = %created.task_id,
+                "TickTickに登録済みだがDB保存に失敗しました。手動で確認が必要です: {:?}",
+                e
+            );
+            ApiError::internal(e)
+        })?;
+
+    let tz = state.engine.pattern().timezone;
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateReservationResponse {
+            reservation_id,
+            ticktick_task_id: created.task_id,
+            start: slot.start.with_timezone(&tz).to_rfc3339(),
+            end: slot.end.with_timezone(&tz).to_rfc3339(),
+        }),
+    ))
+}
+
+async fn delete_reservation(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<StatusCode, ApiError> {
+    authorize(&headers, &state.api_key)?;
+    let write = state.write_side()?;
+
+    let Some(reservation) = write.reservations.get(&id).await.map_err(ApiError::internal)? else {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "予約が見つかりません",
+        ));
+    };
+
+    // TickTick側を先に消す。DBだけ消えてTickTickに残る状態を避ける
+    write
+        .tasks
+        .delete_task(&reservation.project_id, &reservation.task_id)
+        .await
+        .map_err(ApiError::upstream)?;
+
+    write.reservations.cancel(&id).await.map_err(ApiError::internal)?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ---------- shared ----------
@@ -286,11 +478,11 @@ fn authorize(headers: &HeaderMap, expected: &str) -> Result<(), ApiError> {
     {
         Ok(())
     } else {
-        Err(ApiError {
-            status: StatusCode::UNAUTHORIZED,
-            code: "unauthorized",
-            message: "X-API-Key が不正です".to_string(),
-        })
+        Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "X-API-Key が不正です",
+        ))
     }
 }
 
@@ -298,31 +490,67 @@ pub struct ApiError {
     status: StatusCode,
     code: &'static str,
     message: String,
+    /// 409 の際に返す代替候補
+    alternatives: Vec<SlotView>,
+    /// 409 の際の理由コード
+    reason: Option<String>,
 }
 
 impl ApiError {
+    fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            code,
+            message: message.into(),
+            alternatives: Vec::new(),
+            reason: None,
+        }
+    }
+
     fn bad_request(code: &'static str, message: impl Into<String>) -> Self {
-        Self { status: StatusCode::BAD_REQUEST, code, message: message.into() }
+        Self::new(StatusCode::BAD_REQUEST, code, message)
+    }
+
+    fn conflict(reason: String, detail: String, alternatives: Vec<SlotView>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "slot_unavailable",
+            message: detail,
+            alternatives,
+            reason: Some(reason),
+        }
     }
 
     fn upstream(e: anyhow::Error) -> Self {
         tracing::error!("上流APIの呼び出しに失敗: {:?}", e);
-        Self {
-            status: StatusCode::BAD_GATEWAY,
-            code: "upstream_error",
-            // 上流のエラー詳細はトークン等を含みうるため、クライアントには返さない
-            message: "カレンダーの取得に失敗しました".to_string(),
-        }
+        // 上流のエラー詳細はトークン等を含みうるため、クライアントには返さない
+        Self::new(
+            StatusCode::BAD_GATEWAY,
+            "upstream_error",
+            "外部サービスの呼び出しに失敗しました",
+        )
+    }
+
+    fn internal(e: anyhow::Error) -> Self {
+        tracing::error!("内部エラー: {:?}", e);
+        Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "内部エラーが発生しました",
+        )
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (
-            self.status,
-            Json(serde_json::json!({ "error": self.code, "message": self.message })),
-        )
-            .into_response()
+        let mut body = serde_json::json!({ "error": self.code, "message": self.message });
+        if let Some(reason) = self.reason {
+            body["reason"] = serde_json::Value::String(reason);
+        }
+        if !self.alternatives.is_empty() {
+            body["alternatives"] = serde_json::to_value(&self.alternatives).unwrap_or_default();
+        }
+        (self.status, Json(body)).into_response()
     }
 }
 
@@ -397,6 +625,7 @@ ranges = [
     fn app_with(calendar: Box<dyn CalendarReader + Send + Sync>) -> Router {
         let state = Arc::new(AppState {
             calendar,
+            write: None,
             engine: AvailabilityEngine::new(LifePattern::from_toml_str(PATTERN).unwrap()),
             api_key: "secret".to_string(),
         });
@@ -643,5 +872,214 @@ ranges = [
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // ---------- Phase B: 予約 ----------
+
+    use crate::ports::reservation_store::{NewReservation, Reservation, ReservationStore};
+    use crate::ports::task_writer::{CreatedTask, NewTask, TaskWriter};
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct StubTasks {
+        created: Mutex<Vec<NewTask>>,
+        deleted: Mutex<Vec<(String, String)>>,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl TaskWriter for StubTasks {
+        async fn create_task(&self, req: NewTask) -> Result<CreatedTask> {
+            if self.fail {
+                anyhow::bail!("TickTick障害");
+            }
+            self.created.lock().unwrap().push(req);
+            Ok(CreatedTask {
+                task_id: "task-1".into(),
+                project_id: "proj-1".into(),
+            })
+        }
+        async fn delete_task(&self, p: &str, t: &str) -> Result<()> {
+            self.deleted.lock().unwrap().push((p.into(), t.into()));
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct StubStore {
+        rows: Mutex<Vec<Reservation>>,
+    }
+
+    #[async_trait]
+    impl ReservationStore for StubStore {
+        async fn insert(&self, r: NewReservation) -> Result<String> {
+            let id = format!("res-{}", self.rows.lock().unwrap().len() + 1);
+            self.rows.lock().unwrap().push(Reservation {
+                id: id.clone(),
+                task_id: r.task_id,
+                project_id: r.project_id,
+                title: r.title,
+                slot: r.slot,
+            });
+            Ok(id)
+        }
+        async fn find_overlapping(&self, range: TimeSlot) -> Result<Vec<Reservation>> {
+            Ok(self.rows.lock().unwrap().iter()
+                .filter(|r| r.slot.overlaps(&range)).cloned().collect())
+        }
+        async fn get(&self, id: &str) -> Result<Option<Reservation>> {
+            Ok(self.rows.lock().unwrap().iter().find(|r| r.id == id).cloned())
+        }
+        async fn cancel(&self, id: &str) -> Result<bool> {
+            let mut rows = self.rows.lock().unwrap();
+            let before = rows.len();
+            rows.retain(|r| r.id != id);
+            Ok(rows.len() < before)
+        }
+    }
+
+    fn app_writable(busy: Vec<TimeSlot>) -> Router {
+        let state = Arc::new(AppState {
+            calendar: Box::new(RangeAwareCalendar(busy)),
+            write: Some(crate::config::WriteSide {
+                tasks: Box::new(StubTasks::default()),
+                reservations: Box::new(StubStore::default()),
+            }),
+            engine: AvailabilityEngine::new(LifePattern::from_toml_str(PATTERN).unwrap()),
+            api_key: "secret".to_string(),
+        });
+        router(state)
+    }
+
+    #[tokio::test]
+    async fn reservation_is_created_when_slot_is_free() {
+        let (status, body) = post_json(
+            app_writable(vec![]),
+            "/v1/reservations",
+            Some("secret"),
+            serde_json::json!({
+                "title": "打ち合わせ",
+                "start": "2026-08-26T19:00:00+09:00",
+                "duration_minutes": 60
+            }),
+        ).await;
+
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(body["ticktick_task_id"], "task-1");
+        assert!(body["reservation_id"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn reservation_is_rejected_during_work_hours() {
+        let (status, body) = post_json(
+            app_writable(vec![]),
+            "/v1/reservations",
+            Some("secret"),
+            serde_json::json!({
+                "title": "x",
+                "start": "2026-08-26T11:30:00+09:00",
+                "duration_minutes": 60
+            }),
+        ).await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"], "slot_unavailable");
+        assert_eq!(body["reason"], "blackout");
+        assert!(!body["alternatives"].as_array().unwrap().is_empty(), "代替候補を返すべき");
+    }
+
+    /// 同期遅延中の二重予約を防げること。これがPhase Bの肝
+    #[tokio::test]
+    async fn second_reservation_on_same_slot_is_rejected() {
+        let app = app_writable(vec![]);
+
+        let (s1, _) = post_json(
+            app.clone(), "/v1/reservations", Some("secret"),
+            serde_json::json!({
+                "title": "1件目", "start": "2026-08-26T19:00:00+09:00", "duration_minutes": 60
+            }),
+        ).await;
+        assert_eq!(s1, StatusCode::CREATED);
+
+        // カレンダー未反映でも、DBの記録により塞がりと判定されるべき
+        let (s2, body) = post_json(
+            app, "/v1/reservations", Some("secret"),
+            serde_json::json!({
+                "title": "2件目", "start": "2026-08-26T19:00:00+09:00", "duration_minutes": 60
+            }),
+        ).await;
+
+        assert_eq!(s2, StatusCode::CONFLICT, "同期遅延中の二重予約を許してはいけない");
+        assert_eq!(body["reason"], "busy_pending");
+    }
+
+    #[tokio::test]
+    async fn check_sees_pending_reservation() {
+        let app = app_writable(vec![]);
+        post_json(
+            app.clone(), "/v1/reservations", Some("secret"),
+            serde_json::json!({
+                "title": "予約済み", "start": "2026-08-26T20:00:00+09:00", "duration_minutes": 60
+            }),
+        ).await;
+
+        let (status, body) = post_json(
+            app, "/v1/availability/check", Some("secret"),
+            serde_json::json!({ "start": "2026-08-26T20:00:00+09:00", "duration_minutes": 60 }),
+        ).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["available"], false, "自分で入れた予約を見落としている");
+        assert_eq!(body["reason"], "busy_pending");
+    }
+
+    #[tokio::test]
+    async fn reservation_rejects_empty_title() {
+        let (status, body) = post_json(
+            app_writable(vec![]), "/v1/reservations", Some("secret"),
+            serde_json::json!({
+                "title": "   ", "start": "2026-08-26T19:00:00+09:00", "duration_minutes": 60
+            }),
+        ).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "invalid_title");
+    }
+
+    #[tokio::test]
+    async fn reservation_requires_api_key() {
+        let (status, _) = post_json(
+            app_writable(vec![]), "/v1/reservations", None,
+            serde_json::json!({
+                "title": "x", "start": "2026-08-26T19:00:00+09:00", "duration_minutes": 60
+            }),
+        ).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn reservations_disabled_without_write_side() {
+        let (status, body) = post_json(
+            app(vec![]), "/v1/reservations", Some("secret"),
+            serde_json::json!({
+                "title": "x", "start": "2026-08-26T19:00:00+09:00", "duration_minutes": 60
+            }),
+        ).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"], "write_disabled");
+    }
+
+    #[tokio::test]
+    async fn verify_availability_false_skips_the_check() {
+        // 勤務時間中でも明示的に無効化すれば登録できる
+        let (status, _) = post_json(
+            app_writable(vec![]), "/v1/reservations", Some("secret"),
+            serde_json::json!({
+                "title": "強制登録",
+                "start": "2026-08-26T11:30:00+09:00",
+                "duration_minutes": 60,
+                "verify_availability": false
+            }),
+        ).await;
+        assert_eq!(status, StatusCode::CREATED);
     }
 }

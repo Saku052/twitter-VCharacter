@@ -18,17 +18,23 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let (calendar, engine, app_config) = build_app().await?;
+    let (calendar, write, engine, app_config) = build_app().await?;
 
+    let write_enabled = write.is_some();
     let state = Arc::new(AppState {
-        calendar: Box::new(calendar),
+        calendar,
+        write,
         engine,
         api_key: app_config.api_key,
     });
 
     let addr = format!("0.0.0.0:{}", app_config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!("schedule-broker を起動しました: {}", addr);
+    tracing::info!(
+        "schedule-broker を起動しました: {} (書き込み: {})",
+        addr,
+        if write_enabled { "有効" } else { "無効" }
+    );
 
     axum::serve(listener, router(state)).await?;
     Ok(())
