@@ -36,7 +36,10 @@ impl QiitaPort for QiitaClient {
             .query(&[
                 ("query", query.as_str()),
                 ("page", "1"),
-                ("per_page", "3"),
+                // 取得段階では絞らない。ここを小さくすると、上位が処理済みで埋まったとき
+                // 未処理の記事に永久に到達できなくなる（実測: 30日中7日しか取得できず）。
+                // 1回あたりの投入上限はmain.rs側のQIITA_MAX_PER_RUNで掛ける。
+                ("per_page", "20"),
             ])
             .send()
             .await?

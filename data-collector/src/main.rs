@@ -7,6 +7,9 @@ use config::build_app;
 use crate::ports::{ai_generator::AiGenerator, youtube_port::YoutubePort, memo_writer::MemoWriter, qiita_port::QiitaPort, agent_port::AgentPort};
 
 const MODEL: &str = "gpt-4o-mini";
+// 1回のバッチでQiitaから投入するメモの上限。一括投入を防ぎつつ、
+// 未処理記事は次回以降のバッチで順次消化される
+const QIITA_MAX_PER_RUN: usize = 3;
 const SYSTEM: &str = "<role>さく担当の編集者。ネタ元を読んで、さくが話したくなりそうなポイントだけ抜き出す</role>
 <task>渡された情報（[YouTube動画]または[Qiita記事]）を読み、ネタにできそうな『気づき』『学び』『感想の種』を日本語の短いメモとして1個出力する</task>
 <rules>
@@ -81,9 +84,17 @@ async fn main() {
             Vec::new()
         }
     };
-    let qiita_total = articles.len();
+    // 実際に処理を試みた件数だけを数える（取得件数=分母にすると、
+    // 処理済みスキップが増えるほど成功率が低く見えてしまうため）
+    let mut qiita_total = 0;
+    let mut qiita_inserted = 0;
 
     for article in articles {
+        // 1回のバッチで投入する上限。残りは次回以降に回す
+        if qiita_inserted >= QIITA_MAX_PER_RUN {
+            break;
+        }
+
         match app.2.is_qiita_processed(&article.article_id).await {
             Ok(true) => {
                 println!("スキップ: すでに処理済み article_id={}", article.article_id);
@@ -96,6 +107,8 @@ async fn main() {
                 continue;
             }
         }
+
+        qiita_total += 1;
 
         let input = format!("[Qiita記事] タイトル: {}\n{}", article.title, article.body_excerpt);
         let ai = match app.1.generate(&input, MODEL, SYSTEM).await {
@@ -111,7 +124,10 @@ async fn main() {
         println!("{}", memo);
 
         match app.2.insert_qiita_memo(&memo, &article.article_id).await {
-            Ok(()) => success_count += 1,
+            Ok(()) => {
+                success_count += 1;
+                qiita_inserted += 1;
+            }
             Err(e) => {
                 eprintln!("memo_mqへの書き込みに失敗 article_id={}: {:?}", article.article_id, e);
                 failure_count += 1;
