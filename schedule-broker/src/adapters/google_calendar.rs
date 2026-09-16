@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::Deserialize;
 use std::collections::HashMap;
 use tokio::sync::Mutex;
@@ -11,19 +12,46 @@ use crate::ports::calendar_reader::CalendarReader;
 const FREEBUSY_URL: &str = "https://www.googleapis.com/calendar/v3/freeBusy";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 
+const SCOPE: &str = "https://www.googleapis.com/auth/calendar.readonly";
+const JWT_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:jwt-bearer";
+
 /// Google Calendar FreeBusy APIで埋まり区間を取得する。
 ///
-/// refresh_token から access_token を都度発行する方式（Phase Aでは永続化しない）。
+/// サービスアカウント方式。秘密鍵で署名したJWTをaccess_tokenと交換する。
+/// OAuthのrefresh_token方式と違い、テストアプリの7日失効や
+/// ユーザーの同意取り消しの影響を受けない（2026-08にrefresh_tokenが
+/// invalid_grantで失効し、19日間APIが停止したため移行した）。
+///
+/// サービスアカウント自身はカレンダーを持たないため、
+/// 対象カレンダーを `client_email` に対して共有しておく必要がある。
 /// access_token はプロセス内でのみキャッシュし、期限切れ前に再発行する。
 pub struct GoogleCalendarClient {
-    client_id: String,
-    client_secret: String,
-    refresh_token: String,
+    /// サービスアカウントのメールアドレス（JWTのissuer）
+    client_email: String,
+    /// PEM形式のRSA秘密鍵
+    private_key: String,
     /// 空きを判定する対象カレンダーID。"primary" が既定
     calendar_ids: Vec<String>,
     cached_token: Mutex<Option<CachedToken>>,
     token_url: String,
     freebusy_url: String,
+}
+
+/// サービスアカウントJSONのうち、認証に必要な項目だけを取り出す
+#[derive(Deserialize)]
+pub struct ServiceAccountKey {
+    pub client_email: String,
+    pub private_key: String,
+}
+
+/// JWTのclaims。Googleのトークンエンドポイントに提示する
+#[derive(serde::Serialize)]
+struct JwtClaims<'a> {
+    iss: &'a str,
+    scope: &'a str,
+    aud: &'a str,
+    exp: i64,
+    iat: i64,
 }
 
 #[derive(Clone)]
@@ -33,16 +61,22 @@ struct CachedToken {
 }
 
 impl GoogleCalendarClient {
+    /// サービスアカウントJSON（文字列）から生成する。
+    /// 環境変数に1行で入れられるよう、ファイルではなく文字列を受け取る。
+    pub fn from_service_account_json(json: &str, calendar_ids: Vec<String>) -> Result<Self> {
+        let key: ServiceAccountKey = serde_json::from_str(json)
+            .context("サービスアカウントJSONの解釈に失敗しました")?;
+        Ok(Self::new(key.client_email, key.private_key, calendar_ids))
+    }
+
     pub fn new(
-        client_id: String,
-        client_secret: String,
-        refresh_token: String,
+        client_email: String,
+        private_key: String,
         calendar_ids: Vec<String>,
     ) -> Self {
         Self {
-            client_id,
-            client_secret,
-            refresh_token,
+            client_email,
+            private_key,
             calendar_ids: if calendar_ids.is_empty() {
                 vec!["primary".to_string()]
             } else {
@@ -61,6 +95,24 @@ impl GoogleCalendarClient {
         self
     }
 
+    /// 秘密鍵でJWTを署名する。有効期限はGoogleの上限に合わせて1時間
+    fn build_assertion(&self) -> Result<String> {
+        let now = Utc::now().timestamp();
+        let claims = JwtClaims {
+            iss: &self.client_email,
+            scope: SCOPE,
+            aud: &self.token_url,
+            iat: now,
+            exp: now + 3600,
+        };
+
+        let key = EncodingKey::from_rsa_pem(self.private_key.as_bytes())
+            .context("サービスアカウントの秘密鍵を読み込めませんでした（PEM形式か確認してください）")?;
+
+        encode(&Header::new(Algorithm::RS256), &claims, &key)
+            .context("JWTの署名に失敗しました")
+    }
+
     async fn access_token(&self) -> Result<String> {
         let mut guard = self.cached_token.lock().await;
 
@@ -71,14 +123,14 @@ impl GoogleCalendarClient {
             return Ok(cached.access_token.clone());
         }
 
+        let assertion = self.build_assertion()?;
+
         let client = reqwest::Client::new();
         let response = client
             .post(&self.token_url)
             .form(&[
-                ("client_id", self.client_id.as_str()),
-                ("client_secret", self.client_secret.as_str()),
-                ("refresh_token", self.refresh_token.as_str()),
-                ("grant_type", "refresh_token"),
+                ("grant_type", JWT_GRANT_TYPE),
+                ("assertion", assertion.as_str()),
             ])
             .send()
             .await
@@ -208,6 +260,36 @@ struct BusyPeriod {
 
 #[cfg(test)]
 mod tests {
+    /// テスト署名専用に生成した使い捨てRSA鍵（実環境では使用しない）
+    const TEST_PRIVATE_KEY: &str = r#"-----BEGIN PRIVATE KEY-----
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC2sL38caHJt3ZC
+o+/DtP2TZZIk7A7pC4Som9+F2Xs/CINF4iZOZlnhTVWOdkvP9ljMs9Xq2zJEb70J
+z7AuMZCRSyJyV0rGiUJbXYsSN1JQTE6J101uI0s8Tx3H6KDT8VThz2P4lKnIVpYC
+DluC3BWC+GRu4vaQaXd/g/E75RCEmlRtYNmjN0x0ljf2fmX77eUGtviBn2bIneU4
+pB9gJ0l2nYvaFHGQi8LFyX6tz13OE2x74l64KZ3Fu4liEtsrPP2VVsnbG76XgNo5
+eAfUAS7DhmKLrdrkeeP6L0R4Q5eRXV5CoZBiMb9nZeKvPvqG88Tn0N7u9GiGuN9J
+t1G2nVnrAgMBAAECggEADnXr++T0tPZQJpM6YcfcQIQMLt7+iSTPwdbguQQPdNxU
+I750YMVKPQK1kHq9on7x5XYgqx/hmTgtAu9NF0L2GgIT/m/5a8Cmn3vGi9EUM2Xu
+24tOxjaF+IacqVu5Cz2xhdQ4Kg9+ZuyvoAcJ6FBKZZ0Kuho+AQ1QF6hWenK1vYEl
+RqVJnLAU3yQ/JPnWRbfRCOaykN+PDTK3ghYFn/wPcyEFs9gz0UJHptcbI41UtfUm
+2v1E0DtLuRxTm1GjOBeHvVI+1cuaLc4xuYFfnfkhFTUZ75SM5iadd5sc09rOrSw8
+clDGvRN4Khr2QgzJn1YR9F4YQPXSMpyGI8Qw29z0jQKBgQD1Rdl0wWzlg1efd0jO
+0l/rgU6vq1BDfFYdtu4vvunJgdDrtZT2mDh3M1DNnh+RV1m3f381UzPNY1pfD/B4
++Id7vhcEC8tphGdi4jYOE/wndNZrWBo5KCARXVMGvuu5W/JFJhG/1E6HD/j1Bi6T
+0rKrtniZrGa2flFjRj3R2hH7HQKBgQC+rjND6vXG/W2P7H6XNX4lTtcTVsJr+hmz
+lEoMQI49GmeqPbhfSXNzZCTyXg4XqHOj2syISxIxMBC9X/b6mjUCejOZsH+JSnN6
+XbFmhhJAXQOntx5BWLBmgIFRcNFQuZSSA9n1n3hqhrIsHIoWmpuXQkTraqu9zlVv
+UQLIhpySpwKBgQDPCwmHj4f3LioXSMBDJj8mM99SVxDIBvtC1hq2XzhGi7jqYDvA
+9boklULOb35CWDQ5u/yL7RI7fHTa7j+WPmVPxaT0G2i4R7ZmOIJc2+3s+KnPr21j
+dkWrotXlSeD+dWlLidlNz1ACny8O1wsWabO9U6j2QBvsTTEy1iZ1MNog2QKBgHXV
+yTCLnt8d9fsfNwvSruX3VspIr1Vy9TcYyLnRmxT/oFiAU9Pu3D3PAVYV8beFDhGQ
+QR1o5xEmlvGwwDwV1/Rz+Ddd7zK0o7BW/i5RZC4KTRvz+eqAGGL/vurJQVEVnk6t
+uqAjsJKEMs83w848NTLAbT7eaMufGwTzlzi8lz25AoGBAIQAgIwpWBzX7iJsa/zn
+ydimdN3hY7YkkdVoQl8BPpWhrjQqj+UorVXgZ4UmJl1WG5BfSQAcQa8OSYbZ0sgy
+MfHEJO5nOrLRBqm9ayw87HTOXsPxJZmIWU2wO5uQveGL5VdIkdO55ObsvM0jineO
+KFn3T5Isoz6r8bqh0iaNxUnN
+-----END PRIVATE KEY-----"#;
+
     use super::*;
     use chrono::TimeZone;
     use wiremock::matchers::{method, path};
@@ -240,9 +322,8 @@ mod tests {
             .await;
 
         let client = GoogleCalendarClient::new(
-            "id".into(),
-            "secret".into(),
-            "refresh".into(),
+            "test@test.iam.gserviceaccount.com".into(),
+            TEST_PRIVATE_KEY.into(),
             vec!["primary".into()],
         )
         .with_urls(

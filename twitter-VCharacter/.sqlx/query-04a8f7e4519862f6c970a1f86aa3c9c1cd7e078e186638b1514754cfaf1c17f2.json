@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO posted_tweets (tweet_id, memo_id, body, tags, source)\n            VALUES ($1, $2, $3, $4, $5)\n            ON CONFLICT (tweet_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int4",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "04a8f7e4519862f6c970a1f86aa3c9c1cd7e078e186638b1514754cfaf1c17f2"
+}

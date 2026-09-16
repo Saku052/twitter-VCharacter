@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use hmac::{Hmac, Mac, KeyInit};
@@ -13,6 +13,7 @@ use crate::ports::text_publisher::TextPublisher;
 type HmacSha256 = Hmac<Sha256>;
 
 const DEFAULT_MEDIA_UPLOAD_URL: &str = "https://api.x.com/2/media/upload";
+const DEFAULT_TWEETS_URL: &str = "https://api.twitter.com/2/tweets";
 
 pub struct TwitterClient {
     api_key: String,
@@ -21,6 +22,7 @@ pub struct TwitterClient {
     access_token_secret: String,
     client: Client,
     media_upload_url: String,
+    tweets_url: String,
 }
 
 impl TwitterClient {
@@ -37,6 +39,7 @@ impl TwitterClient {
             access_token_secret,
             client: Client::new(),
             media_upload_url: DEFAULT_MEDIA_UPLOAD_URL.to_string(),
+            tweets_url: DEFAULT_TWEETS_URL.to_string(),
         }
     }
 
@@ -55,7 +58,14 @@ impl TwitterClient {
             access_token_secret,
             client: Client::new(),
             media_upload_url,
+            tweets_url: DEFAULT_TWEETS_URL.to_string(),
         }
+    }
+
+    #[cfg(test)]
+    fn with_tweets_url(mut self, tweets_url: String) -> Self {
+        self.tweets_url = tweets_url;
+        self
     }
 
     fn build_oauth_header(&self, method: &str, url: &str) -> Result<String> {
@@ -111,8 +121,8 @@ impl TwitterClient {
 
 #[async_trait]
 impl TextPublisher for TwitterClient {
-    async fn post_text(&self, content: &str, media_ids: Option<Vec<String>>) -> Result<()> {
-        let url = "https://api.twitter.com/2/tweets";
+    async fn post_text(&self, content: &str, media_ids: Option<Vec<String>>) -> Result<String> {
+        let url = self.tweets_url.as_str();
         let auth_header = self.build_oauth_header("POST", url)?;
 
         let mut body = serde_json::json!({ "text": content });
@@ -130,8 +140,16 @@ impl TextPublisher for TwitterClient {
             .await?;
 
         if response.status().is_success() {
-            println!("投稿成功: {}", content);
-            Ok(())
+            // 作成APIが返すのは id / text / edit_history_post_ids のみ。
+            // 追加フィールドは要求できないため、指標は後から id で引く
+            let body: serde_json::Value = response.json().await?;
+            let tweet_id = body["data"]["id"]
+                .as_str()
+                .context("投稿レスポンスに tweet_id が含まれていません")?
+                .to_string();
+
+            println!("投稿成功 (id={}): {}", tweet_id, content);
+            Ok(tweet_id)
         } else {
             let status = response.status();
             let text = response.text().await?;
@@ -272,5 +290,42 @@ mod tests {
         let result = client.upload_media(b"fake-image-bytes").await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn post_text_returns_tweet_id_from_response() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(header_exists("Authorization"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": { "id": "1955555555555555555", "text": "テスト投稿" }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client("unused".to_string())
+            .with_tweets_url(format!("{}/2/tweets", mock_server.uri()));
+
+        let id = client.post_text("テスト投稿", None).await.unwrap();
+        assert_eq!(id, "1955555555555555555");
+    }
+
+    #[tokio::test]
+    async fn post_text_errors_when_id_is_missing() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(header_exists("Authorization"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": { "text": "idが無い" }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client("unused".to_string())
+            .with_tweets_url(format!("{}/2/tweets", mock_server.uri()));
+
+        assert!(client.post_text("idが無い", None).await.is_err());
     }
 }

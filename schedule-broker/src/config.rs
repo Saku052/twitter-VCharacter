@@ -45,10 +45,9 @@ pub async fn build_app() -> Result<BuiltApp> {
     })?;
     let pattern = LifePattern::from_toml_str(&pattern_src)?;
 
-    let calendar = GoogleCalendarClient::new(
-        env::var("GOOGLE_CLIENT_ID").context("GOOGLE_CLIENT_ID が設定されていません")?,
-        env::var("GOOGLE_CLIENT_SECRET").context("GOOGLE_CLIENT_SECRET が設定されていません")?,
-        env::var("GOOGLE_REFRESH_TOKEN").context("GOOGLE_REFRESH_TOKEN が設定されていません")?,
+    let calendar = GoogleCalendarClient::from_service_account_json(
+        &env::var("GOOGLE_SERVICE_ACCOUNT_JSON")
+            .context("GOOGLE_SERVICE_ACCOUNT_JSON が設定されていません")?,
         env::var("GOOGLE_CALENDAR_IDS")
             .map(|s| {
                 s.split(',')
@@ -57,7 +56,7 @@ pub async fn build_app() -> Result<BuiltApp> {
                     .collect()
             })
             .unwrap_or_else(|_| vec!["primary".to_string()]),
-    );
+    )?;
 
     // 書き込み側は TickTick トークンと DB が揃ったときだけ有効にする。
     // 片方だけの状態で予約を受けると、TickTickに入ったのに記録が残らない等の

@@ -60,6 +60,9 @@ async fn main() {
     let tags = parse_tags(&tags_raw);
 
     // 文章を準備
+    // 記録用に保持してから結合する（prepare_post は所有権を取るため）
+    let body_for_record = body.clone();
+    let tags_for_record = tags.join(" ");
     let post = prepare_post(body, tags);
 
     // 画像生成は一旦廃止（Phase5でペルソナ転換に伴い停止。復活の可能性があるためコメントアウトで残置）
@@ -87,8 +90,24 @@ async fn main() {
 
     // 投稿
     match publisher.post_text(&post, media_ids).await {
-        Ok(_) => {
+        Ok(tweet_id) => {
             memo_repo.mark_used_memo(memoid).await.expect("メモの更新に失敗");
+
+            // 反響分析の起点。記録に失敗しても投稿自体は成功しているので、
+            // ここで落とさず警告に留める
+            if let Err(e) = memo_repo
+                .record_posted_tweet(
+                    &tweet_id,
+                    memoid,
+                    &body_for_record,
+                    &tags_for_record,
+                    memo.source.as_deref(),
+                )
+                .await
+            {
+                eprintln!("投稿の記録に失敗しました (tweet_id={}): {}", tweet_id, e);
+            }
+
             println!("完了！")
         },
         Err(e) => eprintln!("エラー: {}", e),

@@ -4,12 +4,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## プロジェクト概要
 
-Twitter VTuberキャラクター「さく」（ゲーム制作が好きな社会人1年目エンジニア）のツイートを自動生成・投稿するRustボット。Hexagonal Architecture（Ports & Adapters）を採用している（採用理由は[ARCHITECTURE.md](ARCHITECTURE.md)参照）。
+Twitter VTuberキャラクター「さく」（個人でゲームを作っているVtuber。普段は社会人1年目のエンジニア）のツイートを自動生成・投稿するRustボット。Hexagonal Architecture（Ports & Adapters）を採用している（採用理由は[ARCHITECTURE.md](ARCHITECTURE.md)参照）。
 
-Cargoワークスペースではなく、独立した2つのRustプロジェクトで構成されている:
+Cargoワークスペースではなく、独立したプロジェクトの集まりで構成されている。すべてRailwayの同一プロジェクト「Twitter Bot」にデプロイされ、`rootDirectory`でサービスを分けている:
 
-- **twitter-VCharacter/** — メモ(DB)からツイートを生成してXに投稿するメインボット。Railwayにデプロイ
-- **data-collector/** — YouTubeプレイリストなどから情報を収集してメモを作るためのコンポーネント（開発中）
+| ディレクトリ | 言語 | 役割 | 実行形態 |
+|---|---|---|---|
+| **twitter-VCharacter/** | Rust | memo_mqからメモを取り出してツイートを生成・投稿（consumer） | cron 1日3回 |
+| **data-collector/** | Rust | YouTube / Qiita / Agent SDKから情報を集めてメモを作る（producer） | cron 1日1回 |
+| **agent-wrapper/** | Python | Claude Agent SDKにWeb検索させるFastAPIラッパー。`POST /investigate` | 常駐 |
+| **schedule-broker/** | Rust | 他のAIエージェントから呼ばれる空き時間判定・予定登録API。本プロジェクト専用ではなく全プロジェクト横断で使う独立コンポーネント（詳細は[schedule-broker/README.md](schedule-broker/README.md)） | 常駐 |
+
+投稿サービスはRailway上で3つに分かれている（`1755` / `2145` / `0815` の各Twitter-VCharacter）。いずれも同じ`twitter-VCharacter/`をビルドし、cron時刻だけが違う。
 
 ## よく使うコマンド
 
@@ -72,6 +78,14 @@ twitter-VCharacter:
 data-collector:
 - `YOUTUBE_API_KEY`
 - `OPENAI_API_KEY`
+- `DATABASE_URL`
+- `AGENT_SDK_URL`, `AGENT_SDK_API_KEY`（agent-wrapperの接続先。ローカルの`.env`には未設定で、実行時にコマンドラインで渡している）
+
+agent-wrapper:
+- `AGENT_SDK_API_KEY`（`/investigate`の`X-API-Key`と照合する値）
+
+schedule-broker:
+- Google Calendar / TickTickのOAuth情報ほか。[schedule-broker/README.md](schedule-broker/README.md)と`.env.example`を参照
 
 ## デプロイ（Railway）
 

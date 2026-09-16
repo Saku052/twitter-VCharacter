@@ -19,6 +19,8 @@ impl PostgresClient {
 pub struct MemoRow {
     pub id: i32,
     pub memo: Option<String>,
+    /// メモの出所（agent / qiita / youtube）。どの経路のネタが伸びるかの分析に使う
+    pub source: Option<String>,
 }
 
 // TODO: FronRowトレイト for {variable}ってことだよねderiveって。
@@ -29,7 +31,7 @@ impl MemoQueue for PostgresClient {
     async fn fetch_latest_memo(&self) -> Result<MemoRow> {
         let row = sqlx::query_as!(MemoRow,
             "SELECT
-                id, memo
+                id, memo, source
             FROM
                 memo_mq
             WHERE
@@ -50,6 +52,30 @@ impl MemoQueue for PostgresClient {
             SET used_at = NOW()
             WHERE id = $1",
             id
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn record_posted_tweet(
+        &self,
+        tweet_id: &str,
+        memo_id: i32,
+        body: &str,
+        tags: &str,
+        source: Option<&str>,
+    ) -> Result<()> {
+        // 同じ tweet_id を二重に記録しない（再実行時の保険）
+        sqlx::query!(
+            "INSERT INTO posted_tweets (tweet_id, memo_id, body, tags, source)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (tweet_id) DO NOTHING",
+            tweet_id,
+            memo_id,
+            body,
+            tags,
+            source
         )
         .execute(&self.pool)
         .await?;

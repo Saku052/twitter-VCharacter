@@ -9,6 +9,11 @@ __pycache__/
 # 環境変数
 .env
 
+# サービスアカウントの秘密鍵（共有されたカレンダーを読める資格情報。絶対にコミットしない）
+*-service-account.json
+schedule-broker-*.json
+service-account*.json
+
 # macOS
 .DS_Store
 
