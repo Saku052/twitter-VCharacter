@@ -1,7 +1,4 @@
-//! 週次の投稿予定を抽選して DB に書き込む。
-//!
-//! Railway の cron で週1回（月曜の未明）起動する想定。
-//! 投稿そのものは行わない。予定を置くだけで、実行は post-tick が拾う。
+//! 週次の投稿予定を抽選して DB に書き込む（サブコマンド `plan`）。
 //!
 //! 週合計 `WEEKLY_POST_TOTAL` は供給に連動させるパラメータ。
 //! メモの供給が細いあいだは小さくし、回復したら 21 に戻す。分布の形は変えない。
@@ -10,22 +7,14 @@ use anyhow::{Context, Result};
 use chrono::{Duration, Utc};
 use chrono_tz::Asia::Tokyo;
 
-use vcharacter::config::build_schedule_store;
-use vcharacter::domain::schedule::{plan_week, Lcg};
-use vcharacter::ports::schedule_store::ScheduleStore;
+use crate::config::build_schedule_store;
+use crate::domain::schedule::{plan_week, Lcg};
+use crate::ports::schedule_store::ScheduleStore;
 
 /// 供給が足りない間の既定値。{2,3,4} の平均3 × 7日 = 21 が本来の値
 const DEFAULT_WEEKLY_TOTAL: usize = 21;
 
-#[tokio::main]
-async fn main() {
-    if let Err(e) = run().await {
-        eprintln!("予定の作成に失敗しました: {:#}", e);
-        std::process::exit(1);
-    }
-}
-
-async fn run() -> Result<()> {
+pub async fn run() -> Result<()> {
     let store = build_schedule_store().await?;
 
     let weekly_total = std::env::var("WEEKLY_POST_TOTAL")

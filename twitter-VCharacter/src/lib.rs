@@ -2,6 +2,7 @@
 //! main.rs と各 bin から同じモジュールを参照するためにライブラリとして公開する。
 
 pub mod adapters;
+pub mod cli;
 pub mod config;
 pub mod domain;
 pub mod ports;

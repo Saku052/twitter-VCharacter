@@ -1,40 +1,16 @@
-//! 期限の来た投稿予定を実行する。Railway の cron で5分おきに起動する想定。
-//!
-//! 大半の起動では予定がなく、何もせずに終わる。
+//! 期限の来た投稿予定を実行する（サブコマンド `tick`）。
 //!
 //! Railway の cron は前の実行が終わるまで次をスキップする（キューにも入らない）ため、
-//! 生成 API がハングすると以降の投稿が静かに全部止まる。これを避けるため全体に
-//! タイムアウトを掛け、5分の起動間隔より確実に短く打ち切る。
+//! 生成 API がハングすると以降の投稿が静かに全部止まる。呼び出し側でタイムアウトを掛ける。
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use std::time::Duration;
-use tokio::time::timeout;
 
-use vcharacter::config::build_schedule_store;
-use vcharacter::ports::schedule_store::ScheduleStore;
-use vcharacter::publish::publish_once;
+use crate::config::build_schedule_store;
+use crate::ports::schedule_store::ScheduleStore;
+use crate::publish::publish_once;
 
-/// 1回の起動の上限。cron 間隔（5分）より短くして、次の起動を止めない
-const RUN_TIMEOUT: Duration = Duration::from_secs(230);
-
-#[tokio::main]
-async fn main() {
-    match timeout(RUN_TIMEOUT, run()).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => {
-            eprintln!("エラー: {:#}", e);
-            std::process::exit(1);
-        }
-        Err(_) => {
-            // ここで落としておかないと、次以降の cron が延々とスキップされる
-            eprintln!("エラー: {}秒で完了しなかったため打ち切りました", RUN_TIMEOUT.as_secs());
-            std::process::exit(1);
-        }
-    }
-}
-
-async fn run() -> Result<()> {
+pub async fn run() -> Result<()> {
     let store = build_schedule_store().await?;
 
     let Some(slot) = store
