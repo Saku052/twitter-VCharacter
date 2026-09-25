@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT\n                id, memo, source\n            FROM\n                memo_mq\n            WHERE\n                used_at IS NULL\n            ORDER BY\n                created_at\n            LIMIT 1",
+  "query": "SELECT\n                id, memo, source\n            FROM\n                memo_mq\n            WHERE\n                used_at IS NULL\n                AND skipped_reason IS NULL\n            ORDER BY\n                created_at, id\n            LIMIT 1",
   "describe": {
     "columns": [
       {
@@ -28,5 +28,5 @@
       true
     ]
   },
-  "hash": "865383609d55c60d913630af6b5bb9270211daede8ce9d9722a7c6efc7a1464d"
+  "hash": "f0d1722a36f768aef582aaf4f4ce44b0163ba74689c70dbc5dd0bd7ba9943743"
 }

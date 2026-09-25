@@ -4,6 +4,7 @@ mod adapters;
 mod domain;
 
 use config::build_app;
+use domain::memo::validate_memo;
 use crate::ports::{ai_generator::AiGenerator, youtube_port::YoutubePort, memo_writer::MemoWriter, qiita_port::QiitaPort, agent_port::AgentPort};
 
 const MODEL: &str = "gpt-4o-mini";
@@ -27,6 +28,8 @@ async fn main() {
 
     let mut success_count = 0;
     let mut failure_count = 0;
+    // 入口ゲート（validate_memo）で弾いた件数。ゲートが正しく働いた結果なので失敗とは分けて数える
+    let mut rejected_count = 0;
 
     // YouTube処理
     let videos = match app.0.fetch_recent_videos().await {
@@ -65,6 +68,12 @@ async fn main() {
 
         let memo = format!("メモ: {}", ai);
         println!("{}", memo);
+
+        if let Err(reason) = validate_memo(&memo) {
+            eprintln!("ゲートで棄却 source=youtube video_id={} reason={:?}: {}", video.video_id, reason, memo);
+            rejected_count += 1;
+            continue;
+        }
 
         match app.2.insert_memo(&memo, &video.video_id).await {
             Ok(()) => success_count += 1,
@@ -123,6 +132,12 @@ async fn main() {
         let memo = format!("メモ: {}", ai);
         println!("{}", memo);
 
+        if let Err(reason) = validate_memo(&memo) {
+            eprintln!("ゲートで棄却 source=qiita article_id={} reason={:?}: {}", article.article_id, reason, memo);
+            rejected_count += 1;
+            continue;
+        }
+
         match app.2.insert_qiita_memo(&memo, &article.article_id).await {
             Ok(()) => {
                 success_count += 1;
@@ -140,6 +155,11 @@ async fn main() {
         Ok(memos) => {
             let agent_total = memos.len();
             for memo in memos {
+                if let Err(reason) = validate_memo(&memo) {
+                    eprintln!("ゲートで棄却 source=agent reason={:?}: {}", reason, memo);
+                    rejected_count += 1;
+                    continue;
+                }
                 match app.2.insert_agent_memo(&memo).await {
                     Ok(()) => {
                         println!("Agent由来メモを保存しました");
@@ -160,10 +180,11 @@ async fn main() {
         }
     };
     let total = youtube_total + qiita_total + agent_total;
-    println!("バッチ終了: {}件中{}件成功", total, success_count);
+    println!("バッチ終了: {}件中{}件成功（ゲートで棄却{}件）", total, success_count, rejected_count);
 
-    if failure_count > 0 && success_count == 0 {
-        eprintln!("処理を試みた{}件が全件失敗のためエラー終了します", failure_count);
+    // 1件も入らなかった日は、失敗でも全件棄却でも異常として Railway 上で FAILED にする
+    if (failure_count > 0 || rejected_count > 0) && success_count == 0 {
+        eprintln!("処理を試みた{}件が全件失敗または棄却のためエラー終了します", failure_count + rejected_count);
         std::process::exit(1);
     }
 }
