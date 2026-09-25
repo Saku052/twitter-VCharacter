@@ -1,7 +1,10 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use sqlx::PgPool;
+use chrono::{DateTime, Utc};
+use crate::domain::schedule::{PlannedSlot, SCHEDULE_VERSION};
 use crate::ports::memo_queue::MemoQueue;
+use crate::ports::schedule_store::{DueSlot, ScheduleStore};
 
 pub struct PostgresClient {
     pool: PgPool,
@@ -94,5 +97,98 @@ impl MemoQueue for PostgresClient {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl ScheduleStore for PostgresClient {
+    async fn save_plan(&self, slots: &[PlannedSlot]) -> Result<usize> {
+        let mut saved = 0usize;
+        for s in slots {
+            // 同じ時刻の予定が既にあれば無視する（planner の再実行に耐える）
+            let r = sqlx::query!(
+                "INSERT INTO post_schedule
+                    (planned_at, block, planned_count, seq_in_day, schedule_ver)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (planned_at) DO NOTHING",
+                s.planned_at.with_timezone(&Utc),
+                s.block,
+                s.planned_count as i32,
+                s.seq_in_day as i32,
+                SCHEDULE_VERSION,
+            )
+            .execute(&self.pool)
+            .await?;
+            saved += r.rows_affected() as usize;
+        }
+        Ok(saved)
+    }
+
+    async fn claim_due_slot(&self, now: DateTime<Utc>) -> Result<Option<DueSlot>> {
+        // 取り出しと同時に running にする。複数の tick が重なっても同じ予定を二重に拾わない。
+        // 期限を大きく過ぎたものは投稿せず捨てる（遅れて出すと時刻の記録と実態がずれるため）
+        let row = sqlx::query!(
+            "UPDATE post_schedule
+             SET status = 'running'
+             WHERE id = (
+                 SELECT id FROM post_schedule
+                 WHERE status = 'pending'
+                   AND planned_at <= $1
+                   AND planned_at > $1 - INTERVAL '30 minutes'
+                 ORDER BY planned_at
+                 LIMIT 1
+                 FOR UPDATE SKIP LOCKED
+             )
+             RETURNING id, planned_at, block, planned_count, seq_in_day, schedule_ver",
+            now,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| DueSlot {
+            id: r.id,
+            planned_at: r.planned_at,
+            block: r.block,
+            planned_count: r.planned_count,
+            seq_in_day: r.seq_in_day,
+            schedule_ver: r.schedule_ver,
+        }))
+    }
+
+    async fn complete_slot(&self, id: i32, tweet_id: &str) -> Result<()> {
+        sqlx::query!(
+            "UPDATE post_schedule
+             SET status = 'done', tweet_id = $2, executed_at = NOW()
+             WHERE id = $1",
+            id,
+            tweet_id,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn release_slot(&self, id: i32, status: &str) -> Result<()> {
+        sqlx::query!(
+            "UPDATE post_schedule
+             SET status = $2, executed_at = NOW()
+             WHERE id = $1",
+            id,
+            status,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn count_pending_after(&self, from: DateTime<Utc>) -> Result<i64> {
+        let row = sqlx::query!(
+            "SELECT count(*) AS n FROM post_schedule
+             WHERE status = 'pending' AND planned_at >= $1",
+            from,
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.n.unwrap_or(0))
     }
 }

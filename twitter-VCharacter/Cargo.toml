@@ -3,9 +3,17 @@ name = "twitter-VCharacter"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "vcharacter"
+path = "src/lib.rs"
+
+[[bin]]
+name = "twitter-VCharacter"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1.0.102"
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono"] }
 async-trait = "0.1.89"
 base64 = "0.22.1"
 dotenvy = "0.15.7"
@@ -16,6 +24,8 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 sha2 = "0.11.0"
 tokio = { version = "1.52.1", features = ["full"] }
+chrono = { version = "0.4.45", features = ["serde"] }
+chrono-tz = "0.10.4"
 
 [dev-dependencies]
 wiremock = "0.6"

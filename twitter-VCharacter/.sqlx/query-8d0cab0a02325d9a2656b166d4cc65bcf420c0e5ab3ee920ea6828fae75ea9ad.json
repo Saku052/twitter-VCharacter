@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE post_schedule\n             SET status = $2, executed_at = NOW()\n             WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8d0cab0a02325d9a2656b166d4cc65bcf420c0e5ab3ee920ea6828fae75ea9ad"
+}
