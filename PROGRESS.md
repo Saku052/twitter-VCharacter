@@ -744,3 +744,9 @@ Phase6の要件定義に入る前に現状把握をしたところ、**19日間�
 - **プロンプト v1.1（2026-09-25）**: G3 で `BODY_SYS_PRPT` に1行追加した。反響分析ではこの日を境に期間を分ける。導入後1週間は `出力ガードで棄却 reason=model_skip` が正常メモで出ていないかログを確認する
 - 失敗の能動的な通知（Discord等）は未対応。Railway の FAILED 表示の通知設定はダッシュボードで要確認
 - スキップ率は `SELECT skipped_reason, count(*) FROM memo_mq WHERE skipped_reason IS NOT NULL GROUP BY 1` で集計できる
+
+### 次にやること（アクションアイテム）
+
+- [ ] **導入後1週間のログ確認（期限: 2026-10-02。Railwayのログ保持は約7日なのでそれ以内に）**
+  - `出力ガードで棄却 reason=model_skip` … 正常なメモで出ていたら、生成AIがSKIPを誤って返しているサイン（G3の誤爆）。DBでも `SELECT id, memo FROM memo_mq WHERE skipped_reason = 'model_skip'` で中身を確認できる
+  - `ゲートで棄却`（data-collector）… G2で弾いたメモ。正常なメモが弾かれていないか、毎日のように出ていないかを見る。こちらはDBに残らないのでRailwayのログでしか見られない
