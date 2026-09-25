@@ -36,8 +36,9 @@ impl MemoQueue for PostgresClient {
                 memo_mq
             WHERE
                 used_at IS NULL
+                AND skipped_reason IS NULL
             ORDER BY
-                created_at
+                created_at, id
             LIMIT 1"
         )
         .fetch_one(&self.pool)
@@ -52,6 +53,19 @@ impl MemoQueue for PostgresClient {
             SET used_at = NOW()
             WHERE id = $1",
             id
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn mark_skipped_memo(&self, id: i32, reason: &str) -> Result<()> {
+        sqlx::query!(
+            "UPDATE memo_mq
+            SET skipped_reason = $2
+            WHERE id = $1",
+            id,
+            reason
         )
         .execute(&self.pool)
         .await?;

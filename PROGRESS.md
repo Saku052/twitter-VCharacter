@@ -707,3 +707,40 @@ Phase6の要件定義に入る前に現状把握をしたところ、**19日間�
 - **YouTubeプレイリストへの動画追加**（ユーザー作業）
 - **Agent SDKの話題重複対策**（今回は見送り）: 毎日ゼロから調査するため過去の出力を知らず、同じ話題を繰り返す。`/investigate`に直近のメモを渡してTASK_PROMPTで回避させる等
 - Railway APIトークンが失効したため、CLIからの状態確認には`railway login`での再認証が必要
+
+---
+
+## 2026-09 品質ガード（壊れたメモ・AIの返答文を投稿させない）
+
+### 経緯
+
+- 2026-09-24 08:17 に「了解です！確定したメモを送ってください。そこから本人視点のツイート本文に整えます。」が投稿された。元メモ（id 283）は「2つのトピックが固まったので、メモを確定します。」で、③のフィルタ（`_is_valid_memo`）導入後に作られたのにすり抜けた
+- 09-02 08:18 にも「Sources:」だけのメモ（id 204）から「ツイート化したいメモを送ってください！…」が投稿されていた
+- 原因: 検査が agent-wrapper のブロックリスト1か所だけで、data-collector と twitter-VCharacter は受け取ったものを素通ししていた。投稿失敗も終了コード0で見えなかった
+
+### 設計（各アプリが自分の出口で1つずつ保証する）
+
+設計図: https://claude.ai/artifact/7o8LH2n6em3CVrq1KDMJDa
+
+| 関門 | 場所 | 保証すること |
+|---|---|---|
+| G1 | `agent-wrapper/main.py` `_is_valid_memo`（強化） | Agentの発言から「メモの行」だけを切り出す（パース）。最低15字・末尾コロン・作業報告/応答の言い回しを追加 |
+| G2 | `data-collector/src/domain/memo.rs` `validate_memo`（新設） | memo_mq に入るメモは素材として成立している（3ソース共通の唯一の入口）。内容判定はここを正とする |
+| G3 | `twitter-VCharacter` `BODY_SYS_PRPT`（1行追加） | 素材にならないメモには本文を書かず `SKIP` とだけ返させる |
+| G4 | `twitter-VCharacter/src/domain/post.rs` `validate_body`（新設） | アシスタント応答文・空・140字超・URL入りの本文は投稿しない |
+
+- 弾いた本文のメモは `memo_mq.skipped_reason` に理由コードを記録し、取得対象から外す（`fetch_latest_memo` は `used_at IS NULL AND skipped_reason IS NULL`、並びは `created_at, id` で同日内も決定的に）
+- 1回の実行で最大3件まで次のメモを試す（`MAX_ATTEMPTS`）。3件とも弾かれた・投稿失敗・DB更新失敗は **exit 1**（Railway 上で FAILED になる）
+- data-collector も、1件も入らなかった日（全件失敗または全件棄却）は exit 1
+
+### 検証
+
+- 規則は実データで事前確認: 正常メモ167件で誤爆0、投稿済み本文146件で誤爆0（弾くのは実際に漏れた2件のみ）、既知の破損パターン全件を棄却
+- `cargo test`: twitter-VCharacter 27件 / data-collector 7件 すべて pass。`SQLX_OFFLINE=true cargo build` も通過
+- 本番DB: `ALTER TABLE memo_mq ADD COLUMN skipped_reason TEXT;` を適用済み（2026-09-25）。未使用キュー18件は全件新規則を通過
+
+### 注意・残課題
+
+- **プロンプト v1.1（2026-09-25）**: G3 で `BODY_SYS_PRPT` に1行追加した。反響分析ではこの日を境に期間を分ける。導入後1週間は `出力ガードで棄却 reason=model_skip` が正常メモで出ていないかログを確認する
+- 失敗の能動的な通知（Discord等）は未対応。Railway の FAILED 表示の通知設定はダッシュボードで要確認
+- スキップ率は `SELECT skipped_reason, count(*) FROM memo_mq WHERE skipped_reason IS NOT NULL GROUP BY 1` で集計できる

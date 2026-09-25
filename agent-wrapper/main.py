@@ -11,23 +11,31 @@ APP_DIR = Path(__file__).resolve().parent
 # 実際には前置き・見出し・参考リンクが混ざることがある（実測: 35日中9日）。
 # プロンプトの遵守を前提にせず、採用前にコード側で弾く。
 EXPECTED_MEMO_COUNT = 2
+MEMO_MIN_LEN = 15  # 「Sources:」のような断片を弾く。正常なメモは実測で最短20字台
 MEMO_MAX_LEN = 80  # CLAUDE.mdの指示は50字以内。表記ゆれを見込んで余裕を持たせる
 
-# 1つでも該当したらメモではないと判断するパターン
+# 1つでも該当したらメモではないと判断するパターン。
+# ここは「どの行がメモか」を切り出すパースの責任。内容の最終判定は data-collector の
+# domain::memo::validate_memo（キュー入口ゲート）が持つ
 _REJECT_PATTERNS = [
     re.compile(r"https?://"),          # 参考リンク行。URL付き投稿はX APIの単価が13倍になる
-    re.compile(r"^[-*・#>]"),          # 箇条書き・見出し記号で始まる行
-    re.compile(r"^\d+[.)]"),           # 「1. 」のような番号付け
+    re.compile(r"^[-*・#>•]"),         # 箇条書き・見出し記号で始まる行
+    re.compile(r"^\d+[.)．）]"),        # 「1. 」のような番号付け
     re.compile(r"\*\*"),               # **メモ1（…）** のような強調見出し
     re.compile(r"以下[、,：:]|以下の\d+|以下です"),  # 「以下、最終メモ2個です」「〜しました。以下、2つのメモです」
     re.compile(r"^メモ\s*\d"),         # 「メモ1」「メモ 2」
+    re.compile(r"[:：]$"),             # 「Sources:」のような見出し行（2026-09-02に投稿された）
     re.compile(r"CLAUDE\.md|TASK_PROMPT|WebSearch"),  # 内部の仕組みへの言及
     re.compile(r"文字以内|字以内|収まって|作成しました|作成します|深掘りしました"),  # 自己申告・前置き
+    # 作業報告（「2つのトピックが固まったので、メモを確定します。」が2026-09-24に投稿された）
+    re.compile(r"確定します|確定しました|トピックが(固ま|決ま)|メモを(確定|作成|出力|まとめ)"),
+    re.compile(r"了解|承知しました|かしこまりました"),  # アシスタントとしての応答
+    re.compile(r"^Sources?\b|参考[:：]|出典"),       # 参考文献の見出し
 ]
 
 
 def _is_valid_memo(line: str) -> bool:
-    if not (0 < len(line) <= MEMO_MAX_LEN):
+    if not (MEMO_MIN_LEN <= len(line) <= MEMO_MAX_LEN):
         return False
     return not any(p.search(line) for p in _REJECT_PATTERNS)
 
